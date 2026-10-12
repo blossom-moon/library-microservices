@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Dapper;
 using Microsoft.Data.SqlClient;
 using Library.Loans.Dal.Interfaces;
@@ -18,6 +19,12 @@ public abstract class BaseDapperRepository<T> : RepositoryBase, IGenericReposito
     protected readonly string TableName;
     protected readonly string IdColumn;
 
+    // Ім'я таблиці/колонки — єдине, що підставляється в текст запиту (значення
+    // даних — лише параметрами). Додатково перевіряємо, що це простий
+    // ідентифікатор (літери/цифри/підкреслення, опційно схема через крапку).
+    private static readonly Regex SafeIdentifier =
+        new(@"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$", RegexOptions.Compiled);
+
     protected BaseDapperRepository(
         SqlConnection connection,
         Func<SqlTransaction?> currentTransaction,
@@ -25,8 +32,24 @@ public abstract class BaseDapperRepository<T> : RepositoryBase, IGenericReposito
         string idColumn)
         : base(connection, currentTransaction)
     {
+        if (!SafeIdentifier.IsMatch(tableName))
+            throw new ArgumentException("Invalid table name.", nameof(tableName));
+        if (!SafeIdentifier.IsMatch(idColumn))
+            throw new ArgumentException("Invalid id column name.", nameof(idColumn));
+
         TableName = tableName;
         IdColumn = idColumn;
+    }
+
+    // Лише прості властивості стають колонками INSERT; навігаційні (списки,
+    // вкладені об'єкти, як Loan.Items) пропускаються.
+    private static bool IsColumnType(Type type)
+    {
+        type = Nullable.GetUnderlyingType(type) ?? type;
+        return type.IsPrimitive || type.IsEnum
+            || type == typeof(string) || type == typeof(decimal)
+            || type == typeof(DateTime) || type == typeof(DateTimeOffset)
+            || type == typeof(Guid) || type == typeof(byte[]);
     }
 
     public virtual async Task<T?> GetByIdAsync(long id, CancellationToken ct = default)
@@ -51,7 +74,8 @@ public abstract class BaseDapperRepository<T> : RepositoryBase, IGenericReposito
         await EnsureOpenAsync(ct);
 
         var props = typeof(T).GetProperties()
-            .Where(p => p.CanRead && !string.Equals(p.Name, IdColumn, StringComparison.OrdinalIgnoreCase))
+            .Where(p => p.CanRead && IsColumnType(p.PropertyType)
+                        && !string.Equals(p.Name, IdColumn, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         var columns = string.Join(", ", props.Select(p => p.Name));

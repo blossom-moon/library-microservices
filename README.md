@@ -1,154 +1,125 @@
-# LibraryLabs
+# LibraryLabs — бібліотечна мікросервісна система
 
-Три сервіси бібліотечної системи, кожен зі своєю базою (database-per-service):
+## Предметна область
 
-| Сервіс | Домен | Технологія | Папка |
+Бібліотека: читачі беруть книги на видачу, книги ведуться в каталозі,
+читачі залишають відгуки й обговорюють книги. Система поділена на три
+незалежні контексти (Database-per-Service), кожен зі своєю базою й
+технологією. FOREIGN KEY між базами немає — зв'язок лише через
+ідентифікатори та контрольоване дублювання даних.
+
+| Контекст | База | Технологія | Сутності |
 |---|---|---|---|
-| **Library.Loans** | Читачі, Книги, Видачі | SQL Server, ADO.NET + Dapper, 3-шарова архітектура | `Library.Loans.Solution/` |
-| **Library.Catalog** | Каталог книг (автори, видавці, категорії) | SQL Server, EF Core Code-First | `Library.Catalog/` |
-| **Library.Reviews** | Відгуки на книги | MongoDB | `Library.Reviews/` |
+| **Loans** (Проєкт №1) | `Library_Loans` | SQL Server | Readers, Books (копія), Loans, LoanDetails, LoanItems, LoanStatusHistory |
+| **Catalog** (Проєкт №2) | `Library_Catalog` | SQL Server + EF Core | Books, Authors, Publishers, Categories, BookDetails, BookAuthors |
+| **Reviews** (Проєкт №3) | `Library_Reviews` | MongoDB | reviews, discussions, messages, ratings |
 
-Між сервісами немає FOREIGN KEY-зв'язків — лише дублювання узгоджених
-полів (eventual consistency). Політика дублювання:
+ERD усіх трьох контекстів: [docs/erd.md](docs/erd.md).
 
-| Поле | Де зберігається | Джерело правди (owner) | Політика узгодженості |
+## Політика дублювання даних між базами
+
+| Поле | Де зберігається | Джерело правди | Політика узгодженості |
 |---|---|---|---|
-| `BookTitle` | `Library_Loans.dbo.LoanItems.BookTitle` | `Library.Catalog` (`Book.Title`) | Копіюється в момент видачі (`sp_CreateLoan`); не оновлюється ретроактивно, якщо назву пізніше змінили в каталозі — видача відображає назву "на момент видачі" |
-| `BookId` / `Isbn` | `Library_Loans.dbo.Books`, `Library.Catalog.Books`, `Library.Reviews` (`bookId`/`isbn` у документі відгуку) | `Library.Catalog` | `Isbn` як природний ключ синхронізації; `Library.Loans` веде власний `IsAvailable`, що є локальним станом (не каталожним полем) |
-| `ReaderFullName` (якщо використовується у відгуках) | `Library.Reviews` (`authorName`) | `Library.Loans.dbo.Readers.FullName` | Копіюється при створенні відгуку, не синхронізується назад |
+| `BookId`, `Isbn`, `Title` | `Library_Loans.Books` | `Library_Catalog.Books` | локальна копія; `Isbn` — природний ключ синхронізації, `SyncedAt` фіксує момент копіювання |
+| `IsAvailable` | `Library_Loans.Books` | `Library_Loans` | не дублюється з Catalog — це локальний стан видачі |
+| `BookTitle` | `Library_Loans.LoanItems` | `Library_Catalog.Books.Title` | знімок на момент видачі, ретроактивно не оновлюється |
+| `bookId` | `Library_Reviews.reviews`, `discussions`, `ratings` | `Library_Catalog.Books.BookId` | посилання без FK; консистентність на рівні застосунку |
+| `readerId`, `readerName` | `Library_Reviews.reviews` | `Library_Loans.Readers` | `readerId` — посилання, `readerName` — знімок на момент відгуку |
+| `bookTitle` | `Library_Reviews.ratings` | `Library_Catalog.Books.Title` | знімок, оновлюється разом з агрегатом рейтингу |
 
-## 1. Розгортання Lab01 (Library.Loans — SQL Server)
+Модель узгодженості — eventual consistency: дублікати допускають коротке
+розходження і не потребують розподілених транзакцій.
 
-Виконати в SSMS, **у порядку**, у контексті бази `Library_Loans`:
+## Розгортання баз (Lab01)
 
-1. `schema.sql` — таблиці, індекси, обмеження (у вас уже застосовано раніше).
-2. `sql/fix_sp_ReturnBook_sp_CancelLoan.sql` — оновлені процедури з явною
-   транзакцією, `UPDLOCK`-перевіркою статусу та `THROW` на неприпустимий
-   перехід (50001/50002/50003). **Обов'язково перевиконати** — без цього
-   кроку обробка помилок у `LoanRepository.cs` не працюватиме.
-3. `sql/seed_library_loans.sql` — ідемпотентні тестові дані (`IF NOT EXISTS`
-   за природним ключем: `CardNumber`, `Isbn`) — можна запускати повторно
-   без дублікатів.
+Порядок запуску скриптів із папки `db/`:
 
-Аналогічно для `Library.Catalog` (EF Core, `dotnet ef database update`) і
-`Library.Reviews` (MongoDB Atlas, колекції створюються при першому записі).
+1. **Library_Loans** (SSMS, база `Library_Loans`): `db/p1/schema.sql` → `db/p1/procedures.sql` → `db/p1/seed.sql`
+2. **Library_Catalog** (SSMS, база `Library_Catalog`): `db/p2/schema.sql` → `db/p2/seed.sql`
+3. **Library_Reviews** (mongosh, кластер Atlas): `db/p3/collections.js` → `db/p3/seed.js`
 
-## 2. Lab02 — тришарова архітектура (Library.Loans.Solution)
+Усі seed-скрипти ідемпотентні (`IF NOT EXISTS` / `upsert`) — повторний запуск
+не створює дублікатів. Порожню базу (`Library_Loans`, `Library_Catalog`)
+потрібно створити вручну перед запуском `schema.sql`.
 
-```
-Library.Loans.Api → Library.Loans.Bll → Library.Loans.Dal → Library.Loans.Domain
-```
+Seed-дані `db/p1` і `db/p2` узгоджені за ISBN. На чистому розгортанні
+(порожні бази) `BookId` 1–4 також збігаються в обох базах; зв'язок між
+сервісами в будь-якому разі тримається на `Isbn` як природному ключі.
 
-Запуск без Aspire (поточний спосіб):
+## Lab02 — тришарова архітектура (Library.Loans.Solution)
 
-```
-cd Library.Loans.Solution/Library.Loans.Api
-dotnet build
-dotnet bin/Debug/net10.0/Library.Loans.Api.dll
-```
+### Схема рішення
 
-Відкрити Swagger на показаній у консолі адресі (`https://localhost:XXXX/swagger`).
-
-### Приклади запитів
-
-Створити читача:
-```
-POST /api/Readers
-{
-  "cardNumber": "RDR-0010",
-  "fullName": "Тест Тестович",
-  "email": "test@example.com",
-  "phone": "+380000000000"
-}
+```mermaid
+flowchart LR
+    Client[Клієнт / Swagger] --> Api[Library.Loans.Api<br/>контролери, ProblemDetails]
+    Api --> Bll[Library.Loans.Bll<br/>сервіси, DTO, AutoMapper]
+    Bll --> Dal[Library.Loans.Dal<br/>репозиторії, Unit of Work]
+    Dal --> Domain[Library.Loans.Domain<br/>моделі, винятки]
+    Bll --> Domain
+    Dal --> Db[(SQL Server<br/>Library_Loans)]
+    AppHost[Library.Loans.AppHost<br/>.NET Aspire] -. запускає .-> Api
 ```
 
-Створити видачу:
-```
-POST /api/Loans
-{
-  "readerId": 1,
-  "dueDate": "2026-11-01",
-  "bookIds": [1, 2]
-}
-```
+Залежності йдуть в один бік: `Api → Bll → Dal → Domain`.
 
-Повернути книгу:
-```
-POST /api/Loans/{loanId}/return/{bookId}
-```
+### Що потрібно для запуску
 
-Скасувати видачу:
-```
-POST /api/Loans/{loanId}/cancel
-```
-
-Отримати видачу з позиціями (multi-mapping JOIN):
-```
-GET /api/Loans/{loanId}
-```
+- .NET SDK 10
+- SQL Server (Express) з базою `Library_Loans`, розгорнутою за розділом «Розгортання баз» вище
+- Рядок підключення `ConnectionStrings:LibraryLoans` в
+  `Library.Loans.AppHost/appsettings.json` (за потреби змініть сервер)
 
 ### Запуск через .NET Aspire
 
-Якщо встановлено Aspire workload:
-
 ```
-dotnet workload install aspire
-dotnet new install Aspire.ProjectTemplates
-dotnet new aspire-apphost -n Library.Loans.AppHost -o Library.Loans.Solution/Library.Loans.AppHost
+cd Library.Loans.Solution
+dotnet run --project Library.Loans.AppHost
 ```
 
-У створеному `Library.Loans.AppHost/Program.cs`:
+AppHost читає рядок підключення зі свого `appsettings.json`, реєструє його
+через `AddConnectionString("LibraryLoans")` і передає в API через
+`WithReference`. Aspire Dashboard відкривається за адресою
+`https://localhost:17180`; там видно ресурс `loans-api`, його логи й
+посилання на Swagger.
 
-```csharp
-var builder = DistributedApplication.CreateBuilder(args);
+Запуск без Aspire: `dotnet run --project Library.Loans.Api` (рядок
+підключення береться з `Library.Loans.Api/appsettings.json`).
 
-var loansDb = builder.AddConnectionString("LibraryLoans");
+### Приклади запитів
 
-builder.AddProject<Projects.Library_Loans_Api>("loans-api")
-       .WithReference(loansDb);
-
-builder.Build().Run();
-```
-
-Додати `Library.Loans.AppHost` до `Library.Loans.slnx`, зробити його
-startup-проєктом, запустити — відкриється Aspire Dashboard з логами й
-трасуванням `loans-api`.
-
-## 3. Git
-
-Робоча гілкова модель: `main` (стабільний стан) → `develop` (інтеграція) →
-`feature/xxx` (кожна фіча окремою гілкою, merge в `develop` через PR).
+Підставте порт API з Aspire Dashboard (`<port>`).
 
 ```
-git init
-git checkout -b develop
-git checkout -b feature/loans-three-tier
-# ... коміти ...
-git checkout develop && git merge feature/loans-three-tier
+# створити читача (201 + Location)
+curl -X POST https://localhost:<port>/api/Readers \
+  -H "Content-Type: application/json" \
+  -d '{"cardNumber":"RDR-0010","fullName":"Тест Тестович","email":"test@example.com"}'
+
+# створити видачу (201)
+curl -X POST https://localhost:<port>/api/Loans \
+  -H "Content-Type: application/json" \
+  -d '{"readerId":1,"dueDate":"2026-12-01","bookIds":[1,2]}'
+
+# отримати видачу з позиціями (200)
+curl https://localhost:<port>/api/Loans/1
+
+# повернути книгу (204)
+curl -X POST https://localhost:<port>/api/Loans/1/return/1
+
+# скасувати видачу (204)
+curl -X POST https://localhost:<port>/api/Loans/1/cancel
 ```
 
-## 4. Що виправлено в цій ревізії (DAL/BLL, Lab02)
+Коди помилок (ProblemDetails): 400 — невалідний запит, 404 — не знайдено,
+409 — бізнес-конфлікт (наприклад, книга вже видана, повторне повернення).
 
-- `IGenericRepository<T>` + `RepositoryBase` + `BaseDapperRepository<T>` —
-  спільний CRUD для Dapper-репозиторіїв написано один раз.
-- `ReaderRepository` свідомо **не** реалізує `IGenericRepository<T>` —
-  демонструє керування `SqlCommand`/`SqlDataReader` вручну.
-- `ILoanRepository.GetWithItemsAsync` — multi-mapping (`QueryAsync<Loan,
-  LoanItem, Loan>` зі `splitOn`) замість двох окремих запитів.
-- `UnitOfWork` створює репозиторії один раз і передає їм делегат
-  `Func<SqlTransaction?>` на поточну транзакцію — репозиторій завжди бачить
-  актуальний стан навіть після Commit/Rollback.
-- `BeginTransactionAsync(IsolationLevel, ct)` — явний рівень ізоляції
-  (`ReadCommitted`), обґрунтування — в коментарі в `UnitOfWork.cs`.
-- `CreateLoanDto`/`CreateReaderDto` — базова модельна валідація через
-  `DataAnnotations` (`[Required]`, `[Range]`, `[EmailAddress]` тощо);
-  `[ApiController]` повертає 400 ще до виклику сервіса.
-- `sp_ReturnBook`/`sp_CancelLoan` — явна транзакція, `UPDLOCK`-перевірка
-  статусу, `THROW` власних кодів помилок (50001/50002/50003), які
-  `LoanRepository` перехоплює й перетворює на `NotFoundException`/
-  `BusinessConflictException`.
-- Ідемпотентний seed-скрипт.
+### Що реалізовано
 
-**Не перевірено локальною збіркою** (у цій хмарній сесії немає .NET SDK) —
-після заміни файлів обов'язково виконати `dotnet build` і перевірити, що
-все компілюється.
+- `IGenericRepository<T>`, `RepositoryBase`, `BaseDapperRepository<T>` — спільний CRUD для Dapper-репозиторіїв.
+- `ReaderRepository` — чистий ADO.NET (`SqlCommand`/`SqlDataReader`), без generic-інтерфейсу.
+- Multi-mapping JOIN (`GetWithItemsAsync`): Loan + LoanItems одним запитом.
+- Unit of Work: одне з'єднання й транзакція на всі репозиторії, явний рівень ізоляції (`ReadCommitted`).
+- DataAnnotations на DTO; бізнес-валідація й доменні винятки в BLL.
+- Централізована обробка помилок (`IExceptionHandler` → `ProblemDetails`).
+- Процедури зі статус-гардом (`UPDLOCK`) і кодами помилок 50001/50002/50003.
