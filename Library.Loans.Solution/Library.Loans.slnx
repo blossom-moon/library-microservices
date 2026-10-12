@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="Library.Loans.Api/Library.Loans.Api.csproj" />
+  <Project Path="Library.Loans.Bll/Library.Loans.Bll.csproj" />
+  <Project Path="Library.Loans.Dal/Library.Loans.Dal.csproj" />
+  <Project Path="Library.Loans.Domain/Library.Loans.Domain.csproj" />
+</Solution>
