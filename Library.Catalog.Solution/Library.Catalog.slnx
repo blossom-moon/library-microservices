@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="Library.Catalog.Api/Library.Catalog.Api.csproj" />
+  <Project Path="Library.Catalog.Bll/Library.Catalog.Bll.csproj" />
+  <Project Path="Library.Catalog.Dal/Library.Catalog.Dal.csproj" />
+  <Project Path="Library.Catalog.Domain/Library.Catalog.Domain.csproj" />
+  <Project Path="Library.Catalog.Tests/Library.Catalog.Tests.csproj" />
+</Solution>
