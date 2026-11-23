@@ -1,0 +1,28 @@
+<Solution>
+  <Folder Name="/Platform/">
+    <Project Path="Platform.AppHost/Platform.AppHost.csproj" />
+    <Project Path="Platform.ServiceDefaults/Platform.ServiceDefaults.csproj" />
+    <Project Path="Platform.ApiGateway/Platform.ApiGateway.csproj" />
+    <Project Path="Platform.Aggregator/Platform.Aggregator.csproj" />
+  </Folder>
+  <Folder Name="/Services/Loans/">
+    <Project Path="Services/Loans/Library.Loans.Api/Library.Loans.Api.csproj" />
+    <Project Path="Services/Loans/Library.Loans.Bll/Library.Loans.Bll.csproj" />
+    <Project Path="Services/Loans/Library.Loans.Dal/Library.Loans.Dal.csproj" />
+    <Project Path="Services/Loans/Library.Loans.Domain/Library.Loans.Domain.csproj" />
+  </Folder>
+  <Folder Name="/Services/Catalog/">
+    <Project Path="Services/Catalog/Library.Catalog.Api/Library.Catalog.Api.csproj" />
+    <Project Path="Services/Catalog/Library.Catalog.Bll/Library.Catalog.Bll.csproj" />
+    <Project Path="Services/Catalog/Library.Catalog.Dal/Library.Catalog.Dal.csproj" />
+    <Project Path="Services/Catalog/Library.Catalog.Domain/Library.Catalog.Domain.csproj" />
+    <Project Path="Services/Catalog/Library.Catalog.Tests/Library.Catalog.Tests.csproj" />
+  </Folder>
+  <Folder Name="/Services/Reviews/">
+    <Project Path="Services/Reviews/Library.Reviews.WebApi/Library.Reviews.WebApi.csproj" />
+    <Project Path="Services/Reviews/Library.Reviews.Application/Library.Reviews.Application.csproj" />
+    <Project Path="Services/Reviews/Library.Reviews.Infrastructure/Library.Reviews.Infrastructure.csproj" />
+    <Project Path="Services/Reviews/Library.Reviews.Domain/Library.Reviews.Domain.csproj" />
+    <Project Path="Services/Reviews/Library.Reviews.Tests/Library.Reviews.Tests.csproj" />
+  </Folder>
+</Solution>

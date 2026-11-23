@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Aggregator залежить лише від ServiceDefaults; сервіси знаходить за логічними іменами -->
+    <ProjectReference Include="..\Platform.ServiceDefaults\Platform.ServiceDefaults.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Лаб. 06: типізовані gRPC-клієнти з DI, генерація клієнтського коду, Redis-кеш агрегованих відповідей -->
+    <PackageReference Include="Grpc.Net.ClientFactory" Version="2.*" />
+    <PackageReference Include="Google.Protobuf" Version="3.*" />
+    <PackageReference Include="Grpc.Tools" Version="2.*">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Aspire.StackExchange.Redis.DistributedCaching" Version="13.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Ті самі .proto, що й у сервісах, — лише клієнтська частина -->
+    <Protobuf Include="..\Services\Catalog\Library.Catalog.Api\Protos\catalog.proto" GrpcServices="Client" Link="Protos\catalog.proto" />
+    <Protobuf Include="..\Services\Loans\Library.Loans.Api\Protos\loans.proto" GrpcServices="Client" Link="Protos\loans.proto" />
+    <Protobuf Include="..\Services\Reviews\Library.Reviews.WebApi\Protos\reviews.proto" GrpcServices="Client" Link="Protos\reviews.proto" />
+  </ItemGroup>
+
+</Project>

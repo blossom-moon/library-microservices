@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UserSecretsId>library-reviews-lab04</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Library.Reviews.Application\Library.Reviews.Application.csproj" />
+    <ProjectReference Include="..\Library.Reviews.Infrastructure\Library.Reviews.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\..\Platform.ServiceDefaults\Platform.ServiceDefaults.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="10.2.3" />
+    <!-- Лаб. 06: gRPC-сервер (містить Google.Protobuf і Grpc.Tools) -->
+    <PackageReference Include="Grpc.AspNetCore" Version="2.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Protobuf Include="Protos\reviews.proto" GrpcServices="Server" />
+  </ItemGroup>
+
+</Project>
