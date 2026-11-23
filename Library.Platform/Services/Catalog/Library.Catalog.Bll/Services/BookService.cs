@@ -3,6 +3,7 @@ using AutoMapper;
 using Library.Catalog.Bll.Caching;
 using Library.Catalog.Bll.Dto;
 using Library.Catalog.Bll.Interfaces;
+using Library.Catalog.Bll.Telemetry;
 using Library.Catalog.Dal.Interfaces;
 using Library.Catalog.Dal.Specifications;
 using Library.Catalog.Domain.Entities;
@@ -27,16 +28,21 @@ public class BookService : IBookService
     private readonly IMapper _mapper;
     private readonly ILogger<BookService> _logger;
     private readonly ITwoLevelCache _cache;
+    private readonly CatalogMetrics _metrics;
 
-    public BookService(IUnitOfWork uow, IMapper mapper, ILogger<BookService> logger, ITwoLevelCache cache)
+    public BookService(IUnitOfWork uow, IMapper mapper, ILogger<BookService> logger, ITwoLevelCache cache, CatalogMetrics metrics)
     {
+        _metrics = metrics;
         _uow = uow;
         _mapper = mapper;
         _logger = logger;
         _cache = cache;
     }
 
-    public async Task<PagedResult<BookDto>> GetListAsync(BookQuery query, CancellationToken ct = default)
+    public Task<PagedResult<BookDto>> GetListAsync(BookQuery query, CancellationToken ct = default) =>
+        _metrics.MeasureAsync("list", () => GetListCoreAsync(query, ct));
+
+    private async Task<PagedResult<BookDto>> GetListCoreAsync(BookQuery query, CancellationToken ct)
     {
         var page = Math.Max(query.Page, 1);
         var pageSize = Math.Clamp(query.PageSize, 1, MaxPageSize);
@@ -57,6 +63,10 @@ public class BookService : IBookService
     /// Відсутня книга (EntityNotFoundException) не кешується.
     /// </summary>
     public Task<BookCardDto> GetByIdAsync(long id, CancellationToken ct = default) =>
+        _metrics.MeasureAsync("get_card", () => GetCardAsync(id, ct));
+
+    // Без вимірювання: викликається і з GetByIdAsync, і з CreateAsync (щоб не рахувати одну операцію двічі)
+    private Task<BookCardDto> GetCardAsync(long id, CancellationToken ct) =>
         _cache.GetOrCreateAsync(CacheKeys.Product(id), CachePolicies.Product, async token =>
         {
             var book = await _uow.Books.GetWithDetailsAsync(id, token)
@@ -64,7 +74,10 @@ public class BookService : IBookService
             return _mapper.Map<BookCardDto>(book);
         }, ct);
 
-    public async Task<BookCardDto> CreateAsync(CreateBookDto input, CancellationToken ct = default)
+    public Task<BookCardDto> CreateAsync(CreateBookDto input, CancellationToken ct = default) =>
+        _metrics.MeasureAsync("create", () => CreateCoreAsync(input, ct));
+
+    private async Task<BookCardDto> CreateCoreAsync(CreateBookDto input, CancellationToken ct)
     {
         if (await _uow.Books.ExistsByIsbnAsync(input.Isbn, ct))
             throw new ConflictException($"Book with ISBN '{input.Isbn}' already exists.");
@@ -90,10 +103,13 @@ public class BookService : IBookService
         // Нова книга з'являється у списку своєї категорії → список застарів
         await _cache.RemoveAsync(CacheKeys.CategoryBooks(book.CategoryId), "BookCreated", ct);
 
-        return await GetByIdAsync(book.BookId, ct);
+        return await GetCardAsync(book.BookId, ct);
     }
 
-    public async Task ChangePriceAsync(long id, decimal newPrice, CancellationToken ct = default)
+    public Task ChangePriceAsync(long id, decimal newPrice, CancellationToken ct = default) =>
+        _metrics.MeasureAsync("change_price", () => ChangePriceCoreAsync(id, newPrice, ct));
+
+    private async Task ChangePriceCoreAsync(long id, decimal newPrice, CancellationToken ct)
     {
         using var activity = Source.StartActivity("ChangeBookPrice");
         activity?.SetTag("book.id", id);
@@ -109,7 +125,10 @@ public class BookService : IBookService
         _logger.LogInformation("Book {BookId} price changed to {NewPrice}", id, newPrice);
     }
 
-    public async Task WriteOffAsync(long id, int quantity, CancellationToken ct = default)
+    public Task WriteOffAsync(long id, int quantity, CancellationToken ct = default) =>
+        _metrics.MeasureAsync("write_off", () => WriteOffCoreAsync(id, quantity, ct));
+
+    private async Task WriteOffCoreAsync(long id, int quantity, CancellationToken ct)
     {
         using var activity = Source.StartActivity("WriteOffBook");
         activity?.SetTag("book.id", id);
@@ -122,11 +141,15 @@ public class BookService : IBookService
         _uow.Books.Update(book);
         await _uow.SaveChangesAsync(ct);
 
+        _metrics.CopiesWrittenOff(quantity);
         await InvalidateBookAsync(book, "BookWrittenOff", ct);     // змінився AvailableCopies
         _logger.LogInformation("Book {BookId} written off: {Quantity} copies", id, quantity);
     }
 
-    public async Task DeleteAsync(long id, CancellationToken ct = default)
+    public Task DeleteAsync(long id, CancellationToken ct = default) =>
+        _metrics.MeasureAsync("delete", () => DeleteCoreAsync(id, ct));
+
+    private async Task DeleteCoreAsync(long id, CancellationToken ct)
     {
         var book = await _uow.Books.GetByIdAsync(id, ct)
                    ?? throw new EntityNotFoundException(nameof(Book), id);
@@ -146,7 +169,10 @@ public class BookService : IBookService
 
     // Друга специфікація (BooksByCategorySpec) проходить через той самий ListAsync
     // Довідниковий список «книги категорії»: рідко змінюється → абсолютний TTL, вищий пріоритет у L1
-    public async Task<IReadOnlyList<BookDto>> GetByCategoryAsync(long categoryId, CancellationToken ct = default) =>
+    public Task<IReadOnlyList<BookDto>> GetByCategoryAsync(long categoryId, CancellationToken ct = default) =>
+        _metrics.MeasureAsync("by_category", () => GetByCategoryCoreAsync(categoryId, ct));
+
+    private async Task<IReadOnlyList<BookDto>> GetByCategoryCoreAsync(long categoryId, CancellationToken ct) =>
         await _cache.GetOrCreateAsync(CacheKeys.CategoryBooks(categoryId), CachePolicies.CategoryBooks, async token =>
         {
             _ = await _uow.Categories.GetByIdAsync(categoryId, token)

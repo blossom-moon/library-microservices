@@ -8,6 +8,8 @@
   <ItemGroup>
     <PackageReference Include="AutoMapper" Version="16.2.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.*" />
+    <!-- Лаб. 07: IMeterFactory для бізнес-метрик -->
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.Abstractions" Version="10.*" />
   </ItemGroup>
 
   <PropertyGroup>

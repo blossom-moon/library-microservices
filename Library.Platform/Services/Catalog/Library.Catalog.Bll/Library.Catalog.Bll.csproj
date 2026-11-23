@@ -12,6 +12,8 @@
     <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.*" />
     <PackageReference Include="Microsoft.Extensions.Caching.Abstractions" Version="10.*" />
     <PackageReference Include="FluentValidation" Version="12.0.0" />
+    <!-- Лаб. 07: IMeterFactory для бізнес-метрик -->
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.Abstractions" Version="10.*" />
   </ItemGroup>
 
   <PropertyGroup>

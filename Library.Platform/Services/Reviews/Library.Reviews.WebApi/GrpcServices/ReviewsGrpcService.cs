@@ -13,13 +13,20 @@ namespace Library.Reviews.WebApi.GrpcServices;
 /// gRPC-адаптер над CQRS-запитами (той самий GetReviewsListQuery, що й у REST-контролері): вхідні дані
 /// перевіряються, винятки перетворюються на RpcException (InvalidArgument / NotFound / Unavailable).
 /// </summary>
-public class ReviewsGrpcService(ISender sender) : ReviewsService.ReviewsServiceBase
+public class ReviewsGrpcService(ISender sender, IConfiguration configuration) : ReviewsService.ReviewsServiceBase
 {
+    // Лише для демонстрації стійкості (Лаб. 07): Chaos:DelayMs > 0 штучно сповільнює відповідь,
+    // щоб викликати timeout і retry в Aggregator. За замовчуванням 0 — без затримки.
+    private readonly int _chaosDelayMs = configuration.GetValue("Chaos:DelayMs", 0);
+
     private const int MaxBooks = 100;
     private const int DefaultPageSize = 20;
 
     public override async Task<ReviewsReply> GetReviewsByBookIds(GetReviewsByBookIdsRequest request, ServerCallContext context)
     {
+        if (_chaosDelayMs > 0)
+            await Task.Delay(_chaosDelayMs, context.CancellationToken);
+
         if (request.BookIds.Count == 0)
             throw new RpcException(new Status(StatusCode.InvalidArgument, "At least one book id is required."));
         if (request.BookIds.Count > MaxBooks)

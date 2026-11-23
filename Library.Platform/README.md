@@ -1,4 +1,104 @@
-# Lab06 — gRPC-виклики та двохрівневе кешування (Memory + Redis)
+# Lab07 — Резильєнтність (Polly), бізнес-метрики та Health Checks
+
+Розширення платформи з Lab06 (Aspire, YARP Gateway, Aggregator на gRPC, Redis-кеш):
+
+* **resilience** для всіх вихідних викликів Aggregator: стандартний обробник (Polly) на кожен клієнт, окремі політики для критичних (Catalog, Loans) і некритичного (Reviews) сервісів, повтори gRPC за статусами;
+* **бізнес-метрики** (`IMeterFactory`): лічильники, гістограми тривалості, `ObservableGauge` — у кожному сервісі;
+* **health checks**: SQL Server, MongoDB, Redis (`Degraded`), gRPC Health Checking Protocol, перевірка залежностей Aggregator; окремі `/health/live` і `/health/ready`;
+* **AppHost**: `WithHttpHealthCheck("/health/ready")` + `WaitFor` — залежні ресурси стартують лише після `Healthy`.
+
+## Що де
+| Вимога | Де в коді |
+|---|---|
+| Standard Resilience Handler для всіх клієнтів | `Platform.ServiceDefaults/Extensions.cs` — `ConfigureHttpClientDefaults(… AddStandardResilienceHandler)` (базовий, для всіх `HttpClient`); у Aggregator клієнти перевизначаються через `RemoveAllResilienceHandlers()` + власний `AddStandardResilienceHandler` — обробники не нашаровуються (`Platform.Aggregator/Resilience/ResilienceExtensions.cs`, `UseResiliencePolicy`) |
+| Повтори gRPC за статусами | `ResilienceExtensions.UseGrpcRetries` — `ServiceConfig` з `RetryPolicy` (`Unavailable`), `MethodName.Default` |
+| Retry / Circuit Breaker / Timeouts | `UseResiliencePolicy`: експоненційна затримка + jitter, `DisableForUnsafeHttpMethods`, `FailureRatio`, `MinimumThroughput`, `SamplingDuration`, `BreakDuration`, `OnRetry`/`OnOpened`/`OnHalfOpened`/`OnClosed`/`OnTimeout` з логуванням (категорія `Polly`) |
+| Різні політики критичних/некритичних | `Platform.Aggregator/Resilience/ResiliencePolicy.cs` (`ResiliencePolicies.Loans/Catalog/Reviews`), підключення — `Platform.Aggregator/Program.cs` |
+| Graceful degradation Redis | `Library.Catalog.Bll/Caching/TwoLevelCache.cs` (L1 → L2 → БД, помилка Redis логується й не ламає запит), `LoanAggregationService` (кеш агрегатів необов'язковий) |
+| Бізнес-метрики | `Library.Loans.Bll/Telemetry/LoanMetrics.cs`, `Library.Catalog.Bll/Telemetry/CatalogMetrics.cs`, `Library.Reviews.Application/Common/Telemetry/ReviewMetrics.cs` + `MetricsBehavior`, `Platform.Aggregator/Telemetry/AggregatorMetrics.cs` |
+| Реєстрація Meter у OpenTelemetry | `Platform.ServiceDefaults/Extensions.cs` — `AddMeter("Loans.Api","Catalog.Api","Reviews.Api","Aggregator.Api")`, `AddMeter("Library.*","Platform.*")`, `AddMeter("Polly")` |
+| Health checks БД | `AddSqlServer` (`loans-db`, `catalog-db`), `AddMongoDb` (`reviews-db`) — теги `database`/`ready`, `timeout` 5 с |
+| Redis health check | `catalog-api` і `aggregator`: `AddRedis(... failureStatus: Degraded)` (`redis-cache`); вбудовану перевірку Aspire вимкнено (`DisableHealthChecks = true`) |
+| gRPC Health Checking Protocol | сервіси: `Platform.ServiceDefaults/GrpcSupport/GrpcHealthExtensions.cs` (`AddGrpcHealthChecks`, `MapGrpcHealthChecksService`); Aggregator: `HealthChecks/GrpcDependencyHealthCheck.cs` (`Health.HealthClient.Check`, дедлайн 2 с) |
+| `/health/live`, `/health/ready` | `Platform.ServiceDefaults/Extensions.cs` — `MapDefaultEndpoints`: доступні в усіх середовищах, JSON-відповідь з деталями кожної перевірки |
+| AppHost | `Platform.AppHost/AppHost.cs` — `WithHttpHealthCheck("/health/ready")`, `WaitFor(...)` |
+
+## Запуск
+Як у Lab06 (`dotnet dev-certs https --trust`, `dotnet user-secrets set "Parameters:sql-password" "<пароль>"` у `Platform.AppHost`, `dotnet run --project Platform.AppHost -p:UseAppHost=false`). У Dashboard → **Resources** усі ресурси мають стати *Healthy* (стовпець *State* / health-значок).
+
+## Політики resilience (Aggregator)
+Для кожного клієнта політика однакова на двох рівнях: HTTP (мережеві збої, таймаути, 5xx/408/429 — Standard Resilience Handler) і gRPC (повтори за статусом у `ServiceConfig`, бо gRPC-статус іде в трейлерах відповіді HTTP 200 і HTTP-обробник його не бачить).
+
+| Параметр | loans-api (критичний) | catalog-api (критичний) | reviews-api (некритичний) | Обґрунтування |
+|---|---|---|---|---|
+| Retry: кількість | 3 | 4 | 1 | Читання ідемпотентні; для критичних — більше спроб, для некритичного швидше здатися й віддати часткову відповідь |
+| Retry: затримка / тип | 200 мс, експоненційна, jitter | 200 мс, експоненційна, jitter | 100 мс, експоненційна, jitter | Експонента знижує навантаження на збійний сервіс; jitter розводить повтори різних клієнтів у часі |
+| Небезпечні методи | `DisableForUnsafeHttpMethods` | те саме | те саме | POST/PUT/DELETE не повторюються — неідемпотентна дія не виконається двічі |
+| Timeout однієї спроби | 3 с | 3 с | 1,5 с | Некритичний сервіс не має права затримувати відповідь |
+| Загальний timeout | 12 с | 15 с | 4 с | ≈ спроби × AttemptTimeout + паузи; узгоджено з retry |
+| Circuit breaker: FailureRatio | 0,3 | 0,3 | 0,7 | Критичний — швидко «розімкнути» й не добивати збійний сервіс; для некритичного — терпимість до окремих збоїв |
+| MinimumThroughput | 10 | 10 | 5 | Мінімум запитів у вікні, щоб рішення було статистично значущим |
+| SamplingDuration | 30 с | 30 с | 15 с | Не менше 2 × AttemptTimeout (вимога Polly) |
+| BreakDuration | 10 с | 10 с | 15 с | Критичним швидше даємо шанс відновитися; некритичному — довша пауза |
+| gRPC retry (MaxAttempts / backoff) | 3 / 200 мс → 2 с ×2 | 4 / 200 мс → 2 с ×2 | 2 / 100 → 500 мс ×2 | Повтор лише для `Unavailable` (транзієнтна недоступність) |
+| gRPC deadline виклику | 8 с | 10 с | 3 с | Усі спроби разом мають вкластися в загальний timeout |
+
+Колбеки Polly логуються (категорія `Polly`): `OnRetry` — Warning, `OnOpened` — Error, `OnHalfOpened` — Warning, `OnClosed` — Information, `OnTimeout` — Error. Polly також публікує метрику `resilience.polly.strategy.events` (`event.name` = `OnRetry`, `OnCircuitOpened`, …) — Meter `Polly` додано в ServiceDefaults.
+
+**Graceful degradation Redis.** Збій Redis не повинен ламати запит: `TwoLevelCache` ловить помилки L2, логує попередження й іде далі до БД (L1/БД залишаються працездатними); Aggregator так само працює без кешу агрегатів. Health check Redis повертає `Degraded` (не `Unhealthy`) — сервіс залишається в ротації.
+
+## Бізнес-метрики
+Кожен клас метрик — **Singleton**, `Meter` створюється через `IMeterFactory` (ім'я Meter — на сервіс). Теги мають низьку кардинальність (операція, результат, транспорт); id сутностей у тегах не використовуються.
+
+| Сервіс (Meter) | Інструмент | Тип | Теги |
+|---|---|---|---|
+| `Loans.Api` | `loans.operations` | Counter | `loans.operation` (create/return/cancel), `loans.result` |
+| | `loans.books.issued` | Counter | — |
+| | `loans.operation.duration` (мс) | Histogram | як `loans.operations` |
+| | `loans.operations.in_flight` | ObservableGauge | — |
+| `Catalog.Api` | `catalog.operations`, `catalog.operation.duration`, `catalog.copies.written_off`, `catalog.operations.in_flight` | Counter / Histogram / Counter / Gauge | `catalog.operation`, `catalog.result` |
+| `Reviews.Api` | `reviews.operations`, `reviews.operation.duration`, `reviews.operations.in_flight` | Counter / Histogram / Gauge | `reviews.operation`, `reviews.kind`, `reviews.result` |
+| `Aggregator.Api` | `aggregator.requests`, `aggregator.dependency.failures`, `aggregator.operation.duration`, `aggregator.requests.in_flight` | Counter / Counter / Histogram / Gauge | `aggregator.transport` (grpc/http), `aggregator.result` (ok/partial/not_found/unavailable/error), `aggregator.dependency` |
+
+Гістограми записують тривалість і успішних, і невдалих операцій (тег `*.result` розрізняє). Перегляд: Dashboard → **Metrics** → ресурс → потрібний Meter.
+
+## Health checks
+| Endpoint | Що перевіряє | Коли 200 / 503 |
+|---|---|---|
+| `/health/live` | лише «процес живий» (перевірка `self`, без залежностей) | 200, поки процес відповідає |
+| `/health/ready` | залежності з тегом `ready`: БД, Redis, downstream-сервіси | `Healthy` і `Degraded` → **200**; `Unhealthy` → **503** |
+| `/health`, `/alive` | усі перевірки / лише live — додатково, **тільки в Development** | |
+
+Відповідь — JSON: `status`, `totalDurationMs`, `checks[]` (`name`, `status`, `durationMs`, `description`, `tags`, `data`; текст помилки — лише в Development).
+
+Перевірки за сервісами:
+* **loans-api** — `loans-db` (SQL, Unhealthy, 5 с);
+* **catalog-api** — `catalog-db` (SQL, Unhealthy), `redis-cache` (Redis, **Degraded**), `cache` (статистика, без тегу `ready`);
+* **reviews-api** — `reviews-db` (MongoDB, Unhealthy);
+* **aggregator** — `loans-api`, `catalog-api` (gRPC Health, **Unhealthy**), `reviews-api` (gRPC Health, **Degraded**), `redis-cache` (**Degraded**).
+
+Усі сервіси також відповідають на `grpc.health.v1.Health/Check` (`Serving`/`NotServing` — за тими ж перевірками з тегом `ready`, звіт оновлюється раз на 10 с). Aggregator викликає `Health.HealthClient.CheckAsync` із дедлайном 2 с.
+
+## Сценарії перевірки
+1. **Усе працює.** `https://localhost:<порт aggregator>/health/ready` → `Healthy`; у Dashboard усі ресурси *Healthy*.
+2. **Зупинка Redis** (Dashboard → redis → Stop): `/health/ready` Aggregator і Catalog → `Degraded`, HTTP **200**; запити `/api/aggregator/loans/1/full` продовжують працювати (без кешу).
+3. **Зупинка reviews-api**: Aggregator `/health/ready` → `Degraded` (reviews), відповідь `/full` — 200 з `warnings`; у логах `Polly` — `OnRetry`, після серії збоїв `OnCircuitOpened` — наступні виклики одразу відхиляються без очікування.
+4. **Сповільнення reviews**: перед запуском AppHost `$env:CHAOS_REVIEWS_DELAY_MS="5000"` → кожен виклик перевищує timeout (дедлайн 3 с) → повтори, `warnings`, відкриття breaker.
+5. **Зупинка loans-api**: Aggregator `/health/ready` → **503** (`Unhealthy`), `/full` → 503.
+6. **Метрики Polly**: Dashboard → Metrics → aggregator → Meter `Polly` → `resilience.polly.strategy.events` (фільтр `event.name`: `OnRetry` / `OnCircuitOpened`).
+7. **Бізнес-метрики**: створіть видачу/зробіть запити до `/api/aggregator/...` → Metrics → `loans.operations`, `aggregator.requests`, `aggregator.operation.duration`.
+
+## Питання до захисту
+* **Чому HTTP-обробник не повторює gRPC-помилки?** gRPC-статус передається в трейлерах відповіді HTTP 200; повтори за статусами налаштовуються в `ServiceConfig` каналу.
+* **Чому `RemoveAllResilienceHandlers`?** Базовий обробник з `ConfigureHttpClientDefaults` додається всім клієнтам; без видалення політики нашаруються (подвійні повтори, два breaker).
+* **Чому `SamplingDuration` ≥ 2 × `AttemptTimeout`?** Вимога валідації Polly: вікно має вміщати кілька спроб.
+* **Чому Redis — `Degraded`, а SQL — `Unhealthy`?** Без кешу сервіс повільніший, але працює; без БД — ні.
+* **Чому liveness не перевіряє залежності?** Інакше збій БД спричинить перезапуск здорового процесу, не виправивши причину.
+* **Чому `DisableForUnsafeHttpMethods`?** Повтор POST може виконати дію двічі.
+
+---
+
+# Lab06 (попередня робота) — gRPC-виклики та двохрівневе кешування (Memory + Redis)
 
 Розширення платформи з Lab05 (.NET Aspire, YARP Gateway, Aggregator, OpenTelemetry, Serilog):
 

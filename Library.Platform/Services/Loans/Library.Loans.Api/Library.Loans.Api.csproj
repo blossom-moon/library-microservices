@@ -14,6 +14,8 @@
   <ItemGroup>
     <!-- Лаб. 06: gRPC-сервер (містить Google.Protobuf і Grpc.Tools) -->
     <PackageReference Include="Grpc.AspNetCore" Version="2.*" />
+    <!-- Лаб. 07: health check SQL Server -->
+    <PackageReference Include="AspNetCore.HealthChecks.SqlServer" Version="9.*" />
   </ItemGroup>
 
   <ItemGroup>

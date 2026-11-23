@@ -8,6 +8,8 @@ using Microsoft.Extensions.Caching.Distributed;
 using Platform.Aggregator.Caching;
 using Platform.Aggregator.Mapping;
 using Platform.Aggregator.Models;
+using Platform.Aggregator.Resilience;
+using Platform.Aggregator.Telemetry;
 
 namespace Platform.Aggregator.Services;
 
@@ -24,6 +26,7 @@ public class LoanAggregationService(
     ReviewsService.ReviewsServiceClient reviews,
     IDistributedCache cache,
     AggregatorCacheMetrics cacheMetrics,
+    AggregatorMetrics metrics,
     ILogger<LoanAggregationService> logger)
 {
     private static readonly ActivitySource Source = new("Platform.Aggregator");
@@ -32,8 +35,6 @@ public class LoanAggregationService(
     // Короткий TTL: агрегат не повинен виглядати «свіжішим», ніж дані окремих сервісів (їхні кеші — до 10–15 хв, але інвалідуються)
     private static readonly DistributedCacheEntryOptions CacheEntryOptions =
         new() { AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(30) };
-
-    private static readonly TimeSpan CallTimeout = TimeSpan.FromSeconds(5);
 
     public async Task<FullLoanDto?> GetFullLoanAsync(long loanId, CancellationToken ct)
     {
@@ -71,7 +72,7 @@ public class LoanAggregationService(
             logger.LogInformation("Calling loans-api over gRPC for loan {LoanId}", loanId);
             var sw = Stopwatch.StartNew();
             loanReply = await loans.GetLoanAsync(new GetLoanRequest { Id = loanId },
-                deadline: Deadline(), cancellationToken: ct);
+                deadline: Deadline(ResiliencePolicies.Loans), cancellationToken: ct);
             logger.LogInformation("loans-api responded over gRPC in {Elapsed} ms", sw.ElapsedMilliseconds);
         }
         catch (RpcException ex) when (ex.StatusCode == StatusCode.NotFound)
@@ -93,7 +94,7 @@ public class LoanAggregationService(
         {
             var request = new GetBooksByIdsRequest();
             request.Ids.AddRange(bookIds);
-            var reply = await catalog.GetBooksByIdsAsync(request, deadline: Deadline(), cancellationToken: ct);
+            var reply = await catalog.GetBooksByIdsAsync(request, deadline: Deadline(ResiliencePolicies.Catalog), cancellationToken: ct);
             return (IReadOnlyList<BookDto>)reply.Books.Select(b => b.ToDto()).ToList();
         });
 
@@ -101,7 +102,7 @@ public class LoanAggregationService(
         {
             var request = new GetReviewsByBookIdsRequest { PageSize = 50 };
             request.BookIds.AddRange(bookIds);
-            var reply = await reviews.GetReviewsByBookIdsAsync(request, deadline: Deadline(), cancellationToken: ct);
+            var reply = await reviews.GetReviewsByBookIdsAsync(request, deadline: Deadline(ResiliencePolicies.Reviews), cancellationToken: ct);
             return (IReadOnlyList<ReviewDto>)reply.Reviews.Select(r => r.ToDto()).ToList();
         });
 
@@ -153,12 +154,14 @@ public class LoanAggregationService(
             // Unavailable / DeadlineExceeded — очікувані збої; решта статусів теж не повинна давати 500
             logger.LogWarning(ex, "{Service} failed over gRPC with {GrpcStatus} after {Elapsed} ms",
                 service, ex.StatusCode, sw.ElapsedMilliseconds);
+            metrics.DependencyFailed(service);
             lock (warnings) warnings.Add($"{service} is unavailable ({ex.StatusCode})");
             return default;
         }
     }
 
-    private static DateTime Deadline() => DateTime.UtcNow.Add(CallTimeout);
+    // Дедлайн залежить від критичності сервісу (див. ResiliencePolicies) і діє на весь виклик разом із повторами
+    private static DateTime Deadline(ResiliencePolicy policy) => DateTime.UtcNow.Add(policy.CallDeadline);
 
     // ---- Кеш: Redis недоступний → працюємо без нього (повільніше), але не падаємо ----
 
