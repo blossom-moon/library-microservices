@@ -1,0 +1,8 @@
+namespace Library.Catalog.Domain.Exceptions;
+
+/// <summary>Сутність не знайдено. → HTTP 404.</summary>
+public class EntityNotFoundException : Exception
+{
+    public EntityNotFoundException(string entity, object key)
+        : base($"{entity} with id '{key}' was not found.") { }
+}
