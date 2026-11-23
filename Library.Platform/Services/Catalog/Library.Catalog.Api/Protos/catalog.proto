@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+option csharp_namespace = "Library.Contracts.Catalog";
+
+package catalog;
+
+// Читання даних каталогу для внутрішніх сервісів (Aggregator).
+// ПРАВИЛО СУМІСНОСТІ: номери полів ніколи не змінюються й не використовуються повторно після публікації —
+// саме номери, а не імена, визначають бінарний формат повідомлення.
+service CatalogService {
+  // Картка однієї книги. NotFound — книги немає; InvalidArgument — id <= 0.
+  rpc GetBook (GetBookRequest) returns (BookReply);
+
+  // Кілька книг одним викликом (для Aggregator). Відсутні книги просто не потрапляють у відповідь.
+  rpc GetBooksByIds (GetBooksByIdsRequest) returns (BooksReply);
+}
+
+message GetBookRequest {
+  int64 id = 1;
+}
+
+message GetBooksByIdsRequest {
+  repeated int64 ids = 1;
+}
+
+message BookReply {
+  int64 book_id = 1;
+  string isbn = 2;
+  string title = 3;
+  Money price = 4;               // гроші — units + nanos, а не double (без похибок округлення)
+  int32 available_copies = 5;
+  string publisher_name = 6;
+  string category_name = 7;
+}
+
+message BooksReply {
+  repeated BookReply books = 1;
+}
+
+// Десяткова сума: 12.50 → units = 12, nanos = 500_000_000
+message Money {
+  int64 units = 1;
+  int32 nanos = 2;
+}
