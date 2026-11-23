@@ -1,3 +1,5 @@
+using Platform.Security;
+using Platform.Security.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Library.Loans.Bll.Dto;
 using Library.Loans.Bll.Interfaces;
@@ -15,6 +17,8 @@ public class ReadersController : ControllerBase
         _readerService = readerService;
     }
 
+    [RequirePermission(Permissions.Loans.Read)]
+
     [HttpGet("{id:long}")]
     [ProducesResponseType(typeof(ReaderDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -23,6 +27,8 @@ public class ReadersController : ControllerBase
         var reader = await _readerService.GetByIdAsync(id, ct);
         return Ok(reader);
     }
+
+    [RequirePermission(Permissions.Loans.Create)]
 
     [HttpPost]
     [ProducesResponseType(typeof(ReaderDto), StatusCodes.Status201Created)]

@@ -1,3 +1,111 @@
+# Lab09 — Аутентифікація та авторизація: Identity + JWT, IdentityServer, Keycloak + Pulumi
+
+Платформа Lab08 захищена трьома незалежними способами; усі сервіси приймають токени кожного з них (policy scheme `Smart` у `Platform.Security` обирає схему за claim `iss`).
+
+| Частина | Що | Де |
+|---|---|---|
+| 1. Identity + JWT | `Library.Auth.Api` (:5244): реєстрація, підтвердження email, login, refresh/revoke, скидання пароля, користувачі й ролі `User`/`Admin` | `Services/Auth/Library.Auth.Api` |
+| 2. IdentityServer | Duende IdentityServer (:5400): Authorization Code + PKCE, Client Credentials, ASP.NET Identity, EF Configuration/Operational store | `Services/IdentityServer/Library.IdentityServer` |
+| 3. Keycloak + Pulumi | realm `LibraryRealm`, ресурс-сервери, ролі, політики, клієнти й користувачі як код | `Pulumi/Library.Keycloak.Pulumi` |
+| Спільне | `[RequirePermission]`, динамічні політики, мульти-емітентна автентифікація, Client Credentials handler | `Platform.Security` (+ `Platform.Security.Tests`) |
+| Заглушка | `payments-api` (:5242): `payments:read/process/refund` | `Services/Payments/Library.Payments.Api` |
+
+## Що де
+| Вимога | Реалізація |
+|---|---|
+| Окрема БД Identity, ролі `User`/`Admin`, seed адміністратора | `AddDbContext<ApplicationDbContext>` + `IdentitySeeder` (Development: `Seed:*` в `appsettings.Development.json`) |
+| Пароль ≥ 8, lockout 5 спроб, унікальний email | `Library.Auth.Api/Program.cs` — `AddIdentity(options => …)` |
+| Access JWT 15 хв (HS256, claims `sub`, `unique_name`, `email`, `jti`, `role`) | `Services/JwtTokenService.cs` |
+| Refresh-токен: 7 днів, у БД лише SHA-256 хеш, rotation, reuse detection, HttpOnly cookie | `Services/RefreshTokenService.cs`, `AuthController.SetRefreshCookie` |
+| Підтвердження email, forgot/reset/change password (одноразові токени з терміном дії) | `AuthController` + `IAuthEmailSender` (mock: лист у лог; у Development токен ще й у відповіді) |
+| Owner-or-admin, Admin-only ендпоінти | `UsersController` |
+| Дозволи `domain:action` на кожному REST-ендпоінті | `[RequirePermission(Permissions.Loans.Read)]` тощо у контролерах Loans/Catalog/Payments |
+| Scope-політики для gRPC (M2M) | `[Authorize(Policy = ApiScopes.LoansRead)]` на gRPC-сервісах |
+| Client Credentials в Aggregator | `Platform.Security/ClientCredentials` + `.AddHttpMessageHandler<ClientCredentialsTokenHandler>()` на gRPC/HTTP-клієнтах |
+| Gateway: перший рубіж, публічні/захищені маршрути, `X-User-Id` | `Platform.ApiGateway/Program.cs`, `appsettings.json` (`auth-public` — anonymous, решта — `authenticated`) |
+| IdentityServer: клієнти `postman` (Code+PKCE), `swagger` (public PKCE), `aggregator_service` (Client Credentials) | `Library.IdentityServer/Data/IdentityServerConfig.cs` |
+| Keycloak як код | `Pulumi/Library.Keycloak.Pulumi/LibraryStack.cs`, матриця — `Matrix.cs`, клієнти — `ClientExtensions.cs` |
+
+## Запуск
+```powershell
+# 1. Секрети AppHost (один раз)
+cd Platform.AppHost
+dotnet user-secrets set "Parameters:sql-password" "<пароль SQL>"
+dotnet user-secrets set "Parameters:rabbit-password" "<пароль>"
+dotnet user-secrets set "Parameters:jwt-secret" "<випадковий рядок ≥ 32 символи>"
+dotnet user-secrets set "Parameters:aggregator-client-secret" "<секрет клієнта aggregator_service>"
+dotnet user-secrets set "Parameters:keycloak-admin-password" "<пароль адміна Keycloak>"
+
+# 2. Міграції (потрібно один раз; dotnet-ef: dotnet tool install --global dotnet-ef)
+cd ..\Services\Auth\Library.Auth.Api
+dotnet ef migrations add Initial
+cd ..\..\IdentityServer\Library.IdentityServer
+dotnet ef migrations add Initial -c ApplicationDbContext      -o Data/Migrations/Identity
+dotnet ef migrations add Initial -c PersistedGrantDbContext   -o Data/Migrations/PersistedGrant
+dotnet ef migrations add Initial -c ConfigurationDbContext    -o Data/Migrations/Configuration
+
+# 3. Запуск (копія на C:, якщо WDAC блокує D:)
+dotnet run --project ..\..\..\Platform.AppHost -p:UseAppHost=false
+
+# 4. Keycloak: коли ресурс keycloak Healthy
+cd ..\..\..\Pulumi\Library.Keycloak.Pulumi
+pulumi login --local; pulumi stack init dev
+pulumi config set --secret keycloak:password "<keycloak-admin-password>"
+pulumi up
+pulumi stack output PostmanClientSecret --show-secrets
+```
+Dev-облікові дані: Auth — `admin` / `Admin#12345` (лише Development); IdentityServer — `alice`, `bob` (пароль `Pass#12345`); Keycloak — `alice` (admin), `bob` (manager), `carol` (user), `dave` (guest), пароль `Pass#12345`.
+
+## Матриця прав
+| Дозвіл | admin | manager | user | guest |
+|---|:-:|:-:|:-:|:-:|
+| `loans:read` / `loans:create` | ✓ | ✓ | ✓ | – |
+| `loans:update` (повернення) | ✓ | ✓ | – | – |
+| `loans:delete` (скасування) | ✓ | – | – | – |
+| `catalog:read` | ✓ | ✓ | ✓ | ✓ |
+| `catalog:create` / `catalog:update` | ✓ | ✓ | – | – |
+| `catalog:delete` | ✓ | – | – | – |
+| `payments:read` | ✓ | ✓ | ✓ | – |
+| `payments:process` | ✓ | ✓ | – | – |
+| `payments:refund` | ✓ | – | – | – |
+
+`loans:approve` і `catalog:publish` визначені в матриці (Keycloak), але відповідних ендпоінтів у домені немає. Для власних токенів (Identity): `Admin` — усе, `User` — `*:read` і `*:create`; для IdentityServer права визначаються `scope` (`loans.read` ≙ `loans:read`).
+Фактичні коди — `./scripts/check-matrix.ps1` (результат у `matrix-result.csv` → вставити в звіт). Без токена будь-який `/api/**` → **401**; токен без потрібного дозволу → **403**.
+
+## Postman
+`postman/Library-Lab09.postman_collection.json`: Identity (register → verify → login → refresh → logout), IdentityServer (Authorization Code+PKCE налаштовується на вкладці Authorization; Client Credentials), Keycloak (токени для alice/bob/carol/dave та виклики з різних ролей), перевірка без токена. Змінні: `keycloakPostmanSecret` (вивід Pulumi), `aggregatorSecret` (= `Parameters:aggregator-client-secret`).
+
+## Розшифровані JWT для звіту
+Вставити токен на jwt.io (або `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(...))`) і зробити скриншот:
+- Identity: `role`: `User` / `Admin`, `sub`, `unique_name`, `exp` (+15 хв).
+- IdentityServer Client Credentials: `client_id`, `scope`, `aud` = `*_api`, **немає `sub`** (немає користувача).
+- Keycloak manager (bob): `resource_access.loans-api.roles` і `catalog-api.roles` зі списком дозволів composite-ролі `manager`.
+
+## Ключові рішення
+- **Три емітенти — одна політика дозволів**: `PermissionEvaluator` читає Keycloak (`authorization.permissions` / `resource_access`), `scope` (IdentityServer) або `role` (Identity). Контролери не залежать від провайдера.
+- **Динамічні політики**: `RequirePermission("loans:read")` → політика `perm:loans:read` створюється провайдером за потреби; немає ручної реєстрації десятків політик.
+- **Gateway і сервіси перевіряють токен обидва** (defense in depth): Gateway відсікає анонімів, сервіс не довіряє мережі.
+- **Refresh-токен**: у БД лише хеш; повторне використання вже відкликаного токена = ознака крадіжки → відкликаються всі сесії користувача.
+- **Keycloak: `ValidateAudience=false`**: audience Keycloak-токенів — `account`, а не API; без цього замість 403 було б 401. Доступ визначають ролі/дозволи.
+- **MapInboundClaims=false**, `RoleClaimType = "role"`: імена claims у коді збігаються з тими, що в токені.
+
+## Питання до захисту
+- **Authentication vs Authorization?** Хто ти (токен валідний) vs що тобі дозволено (роль/дозвіл). 401 — немає/невалідний токен; 403 — токен є, прав немає.
+- **Чому access токен короткий, а refresh довгий і в HttpOnly cookie?** Викрадений access діє хвилини; HttpOnly cookie недоступна JS (XSS), `Path=/auth` і `SameSite=Strict` обмежують відправлення.
+- **Що таке rotation і reuse detection?** Кожен refresh видає новий токен, старий відкликається; повторне пред'явлення старого → відкликання всіх токенів користувача.
+- **Authorization Code + PKCE і Client Credentials — коли що?** Code+PKCE — користувач через браузер, `code_verifier` захищає від перехоплення коду. Client Credentials — сервіс–сервіс, без користувача (немає `sub`).
+- **Чому секрет клієнта зберігається хешем (`Sha256`)?** У БД IdentityServer не лежить відкритий секрет.
+- **Роль vs дозвіл (scope)?** Роль — група користувачів; дозвіл — дія над ресурсом. Composite-роль Keycloak збирає дозволи й розгортається в токені.
+- **Навіщо Pulumi?** Конфігурація Keycloak відтворювана, версіонована й перевіряється ревʼю; `pulumi up` = той самий realm на будь-якому стенді.
+
+## Обмеження
+- Код не компілювався в середовищі розробки (немає .NET SDK): версії пакетів `Duende.IdentityServer*` (7.*), `Aspire.Hosting.Keycloak` (preview) і API `Pulumi.Keycloak` перевірити під час першої збірки.
+- Міграції EF генеруються командами вище (design-time фабрики є).
+- Swagger UI не налаштований на OAuth (клієнт `swagger` у IdentityServer і Keycloak створений, але UI не підключений).
+- Листи — mock (лог). Outbox, ротація ключів HS256, HTTPS у Development не реалізовано.
+
+---
+
 # Lab08 — Подієва мікросервісна архітектура з RabbitMQ
 
 Розширення платформи з Lab07: **Каталог** публікує події про зміну книги, а **Видачі** (Lab02) і **Відгуки** (Lab04) оновлюють свої локальні копії даних згідно з політикою дублювання з Лаб. 01.

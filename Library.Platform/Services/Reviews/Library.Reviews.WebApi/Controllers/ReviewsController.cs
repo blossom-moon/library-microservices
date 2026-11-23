@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.Mvc;
 namespace Library.Reviews.WebApi.Controllers;
 
 [Route("api/reviews")]
+[Microsoft.AspNetCore.Authorization.Authorize]
 public class ReviewsController : ApiControllerBase
 {
     private readonly IMapper _mapper;

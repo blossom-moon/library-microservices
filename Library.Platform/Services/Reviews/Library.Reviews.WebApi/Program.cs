@@ -1,3 +1,6 @@
+using Platform.Security;
+using Platform.Security.Authentication;
+using Platform.Security.Authorization;
 using Library.Reviews.Application;
 using Library.Reviews.Application.Reviews;
 using Library.Reviews.Infrastructure;
@@ -61,6 +64,10 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
+// Лаб. 09: JWT (Local/IdentityServer/Keycloak) + політики дозволів
+builder.AddLibraryAuthentication(ApiResourceNames.Reviews);
+builder.Services.AddLibraryAuthorization();
+
 var app = builder.Build();
 
 app.UseMiddleware<CorrelationIdMiddleware>();   // наскрізний X-Correlation-Id (ServiceDefaults)
@@ -69,6 +76,8 @@ app.UseExceptionHandler();
 app.UseSwagger();
 app.UseSwaggerUI();
 
+app.UseAuthentication();
+app.UseAuthorization();
 app.MapControllers();
 app.MapGrpcService<ReviewsGrpcService>();   // контракт Protos/reviews.proto
 app.MapGrpcReadinessHealth();               // grpc.health.v1.Health (Лаб. 07)

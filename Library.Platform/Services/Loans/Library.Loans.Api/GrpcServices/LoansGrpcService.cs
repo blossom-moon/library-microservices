@@ -1,3 +1,5 @@
+using Microsoft.AspNetCore.Authorization;
+using Platform.Security;
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
 using Library.Contracts.Loans;
@@ -12,6 +14,7 @@ namespace Library.Loans.Api.GrpcServices;
 /// перетворюються на RpcException: NotFound → NotFound, ValidationException → InvalidArgument,
 /// BusinessConflictException → FailedPrecondition.
 /// </summary>
+[Authorize(Policy = ApiScopes.LoansRead)]   // Лаб. 09: M2M — токен Client Credentials зі scope
 public class LoansGrpcService(ILoanService loans) : LoansService.LoansServiceBase
 {
     public override async Task<LoanReply> GetLoan(GetLoanRequest request, ServerCallContext context)

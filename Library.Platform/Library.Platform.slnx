@@ -6,6 +6,8 @@
     <Project Path="Platform.Aggregator/Platform.Aggregator.csproj" />
     <Project Path="Platform.Messaging/Platform.Messaging.csproj" />
     <Project Path="Platform.Messaging.Tests/Platform.Messaging.Tests.csproj" />
+    <Project Path="Platform.Security/Platform.Security.csproj" />
+    <Project Path="Platform.Security.Tests/Platform.Security.Tests.csproj" />
   </Folder>
   <Folder Name="/Services/Loans/">
     <Project Path="Services/Loans/Library.Loans.Api/Library.Loans.Api.csproj" />
@@ -26,5 +28,14 @@
     <Project Path="Services/Reviews/Library.Reviews.Infrastructure/Library.Reviews.Infrastructure.csproj" />
     <Project Path="Services/Reviews/Library.Reviews.Domain/Library.Reviews.Domain.csproj" />
     <Project Path="Services/Reviews/Library.Reviews.Tests/Library.Reviews.Tests.csproj" />
+  </Folder>
+  <Folder Name="/Services/Auth/">
+    <Project Path="Services/Auth/Library.Auth.Api/Library.Auth.Api.csproj" />
+  </Folder>
+  <Folder Name="/Services/IdentityServer/">
+    <Project Path="Services/IdentityServer/Library.IdentityServer/Library.IdentityServer.csproj" />
+  </Folder>
+  <Folder Name="/Services/Payments/">
+    <Project Path="Services/Payments/Library.Payments.Api/Library.Payments.Api.csproj" />
   </Folder>
 </Solution>

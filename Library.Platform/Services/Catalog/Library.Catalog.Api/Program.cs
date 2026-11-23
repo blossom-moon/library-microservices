@@ -1,3 +1,6 @@
+using Platform.Security;
+using Platform.Security.Authentication;
+using Platform.Security.Authorization;
 using FluentValidation;
 using Library.Catalog.Api.GrpcServices;
 using Library.Catalog.Api.HealthChecks;
@@ -85,6 +88,10 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
+// Лаб. 09: JWT (Local/IdentityServer/Keycloak) + політики дозволів
+builder.AddLibraryAuthentication(ApiResourceNames.Catalog);
+builder.Services.AddLibraryAuthorization();
+
 var app = builder.Build();
 
 // ---- Міграції та ідемпотентний сідінг (вимикається в Production або Seeding:Enabled=false) ----
@@ -106,6 +113,8 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
+app.UseAuthentication();
+app.UseAuthorization();
 app.MapControllers();
 app.MapGrpcService<CatalogGrpcService>();       // gRPC-контракт Protos/catalog.proto
 app.MapGrpcReadinessHealth();                   // grpc.health.v1.Health (Лаб. 07)
