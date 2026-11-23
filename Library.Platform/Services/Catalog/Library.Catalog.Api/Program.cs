@@ -6,12 +6,15 @@ using Library.Catalog.Bll;
 using Library.Catalog.Bll.Caching;
 using Library.Catalog.Bll.Interfaces;
 using Library.Catalog.Bll.Services;
+using Library.Catalog.Bll.Telemetry;
 using Library.Catalog.Bll.Validators;
 using Library.Catalog.Dal;
 using Library.Catalog.Dal.Interfaces;
 using Library.Catalog.Dal.Repositories;
 using Library.Catalog.Dal.Seed;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Platform.Messaging;
 using Platform.ServiceDefaults.Correlation;
 using Platform.ServiceDefaults.GrpcSupport;
 
@@ -37,10 +40,24 @@ builder.Services.AddMemoryCache(o =>
     o.TrackStatistics = true;                               // для метрик cache.l1.size / cache.l1.entries
 });
 // L2 — Redis через Aspire (ім'я "redis" = ім'я ресурсу в AppHost; рядок підключення ConnectionStrings:redis)
-builder.AddRedisDistributedCache("redis");
+// Вбудовану перевірку Aspire вимкнено: нижче власна перевірка Redis зі статусом Degraded (кеш необов'язковий)
+builder.AddRedisDistributedCache("redis", settings => settings.DisableHealthChecks = true);
 builder.Services.AddSingleton<CacheMetrics>();
 builder.Services.AddSingleton<ITwoLevelCache, TwoLevelCache>();
-builder.Services.AddHealthChecks().AddCheck<CacheHealthCheck>("cache");
+builder.Services.AddSingleton<CatalogMetrics>();   // Лаб. 07: бізнес-метрики (Singleton)
+
+// ---- Лаб. 07: health checks ----
+// SQL Server — критична залежність (Unhealthy); Redis — необов'язкова (Degraded: сервіс працює, але без L2-кешу)
+builder.Services.AddHealthChecks()
+    .AddCheck<CacheHealthCheck>("cache", tags: ["cache"])
+    .AddSqlServer(connectionString, name: "catalog-db", failureStatus: HealthStatus.Unhealthy,
+        tags: ["database", "sql", "ready"], timeout: TimeSpan.FromSeconds(5))
+    .AddRedis(builder.Configuration.GetConnectionString("redis")!, name: "redis-cache",
+        failureStatus: HealthStatus.Degraded, tags: ["cache", "redis", "ready"], timeout: TimeSpan.FromSeconds(3));
+builder.Services.AddGrpcReadinessHealth();
+
+// ---- Лаб. 08: RabbitMQ — IConnection (Aspire), publisher, оголошення топології при старті ----
+builder.AddMessaging();
 
 // ---- Лаб. 06: gRPC (серверний interceptor логує метод, peer, статус і тривалість) ----
 builder.Services.AddGrpc(o => o.Interceptors.Add<GrpcLoggingInterceptor>());
@@ -91,6 +108,7 @@ if (app.Environment.IsDevelopment())
 
 app.MapControllers();
 app.MapGrpcService<CatalogGrpcService>();       // gRPC-контракт Protos/catalog.proto
-app.MapDefaultEndpoints();                       // /health і /alive
+app.MapGrpcReadinessHealth();                   // grpc.health.v1.Health (Лаб. 07)
+app.MapDefaultEndpoints();                       // /health/live, /health/ready
 
 app.Run();

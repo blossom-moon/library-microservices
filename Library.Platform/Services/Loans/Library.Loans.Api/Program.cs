@@ -3,9 +3,15 @@ using Library.Loans.Api.GrpcServices;
 using Library.Loans.Bll;
 using Library.Loans.Bll.Interfaces;
 using Library.Loans.Bll.Services;
+using Library.Loans.Bll.Telemetry;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Library.Loans.Dal;
 using Library.Loans.Dal.Interfaces;
 using Library.Loans.Domain;
+using Library.Loans.Bll.Events;
+using Platform.Messaging;
+using Platform.Messaging.Events;
+using Platform.Messaging.Topology;
 using Platform.ServiceDefaults.Correlation;
 using Platform.ServiceDefaults.GrpcSupport;
 
@@ -23,6 +29,21 @@ builder.Services.AddScoped<IUnitOfWork>(_ => new UnitOfWork(connectionString));
 // DI: BLL-сервіси
 builder.Services.AddScoped<IReaderService, ReaderService>();
 builder.Services.AddScoped<ILoanService, LoanService>();
+
+// Лаб. 08: RabbitMQ (IConnection через Aspire, топологія при старті) і споживач черги loans.catalog-sync
+builder.AddMessaging();
+builder.Services.AddEventConsumer(MessagingTopology.LoansQueue, registry => registry
+    .Handle<BookPriceChangedEvent, BookPriceChangedHandler>()
+    .Handle<BookRenamedEvent, BookRenamedHandler>());
+
+// Лаб. 07: бізнес-метрики (Singleton: один екземпляр Meter на весь час роботи сервісу)
+builder.Services.AddSingleton<LoanMetrics>();
+
+// Лаб. 07: health checks — SQL Server (критична залежність → Unhealthy), gRPC Health Checking Protocol
+builder.Services.AddHealthChecks()
+    .AddSqlServer(connectionString, name: "loans-db", failureStatus: HealthStatus.Unhealthy,
+        tags: ["database", "sql", "ready"], timeout: TimeSpan.FromSeconds(5));
+builder.Services.AddGrpcReadinessHealth();
 
 // AutoMapper
 builder.Services.AddAutoMapper(cfg => cfg.AddProfile<MappingProfile>());
@@ -54,6 +75,7 @@ if (!app.Environment.IsDevelopment())
 app.UseAuthorization();
 app.MapControllers();
 app.MapGrpcService<LoansGrpcService>();   // контракт Protos/loans.proto
-app.MapDefaultEndpoints();   // /health і /alive
+app.MapGrpcReadinessHealth();             // grpc.health.v1.Health (Лаб. 07)
+app.MapDefaultEndpoints();                // /health/live, /health/ready
 
 app.Run();

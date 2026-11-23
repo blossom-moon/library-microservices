@@ -3,11 +3,15 @@
   <ItemGroup>
     <ProjectReference Include="..\Library.Loans.Dal\Library.Loans.Dal.csproj" />
     <ProjectReference Include="..\Library.Loans.Domain\Library.Loans.Domain.csproj" />
+    <!-- Лаб. 08: події та IEventHandler -->
+    <ProjectReference Include="..\..\..\Platform.Messaging\Platform.Messaging.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="AutoMapper" Version="16.2.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.*" />
+    <!-- Лаб. 07: IMeterFactory для бізнес-метрик -->
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.Abstractions" Version="10.*" />
   </ItemGroup>
 
   <PropertyGroup>

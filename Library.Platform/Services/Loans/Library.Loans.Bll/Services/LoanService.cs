@@ -3,6 +3,7 @@ using System.Diagnostics;
 using AutoMapper;
 using Library.Loans.Bll.Dto;
 using Library.Loans.Bll.Interfaces;
+using Library.Loans.Bll.Telemetry;
 using Library.Loans.Dal.Interfaces;
 using Library.Loans.Domain;
 using Microsoft.Extensions.Logging;
@@ -17,15 +18,20 @@ public class LoanService : ILoanService
     private readonly IUnitOfWork _uow;
     private readonly IMapper _mapper;
     private readonly ILogger<LoanService> _logger;
+    private readonly LoanMetrics _metrics;
 
-    public LoanService(IUnitOfWork uow, IMapper mapper, ILogger<LoanService> logger)
+    public LoanService(IUnitOfWork uow, IMapper mapper, ILogger<LoanService> logger, LoanMetrics metrics)
     {
         _uow = uow;
         _mapper = mapper;
         _logger = logger;
+        _metrics = metrics;
     }
 
-    public async Task<LoanDto> CreateLoanAsync(CreateLoanDto dto, CancellationToken ct)
+    public Task<LoanDto> CreateLoanAsync(CreateLoanDto dto, CancellationToken ct) =>
+        _metrics.MeasureAsync("create", () => CreateLoanCoreAsync(dto, ct), dto.BookIds?.Count ?? 0);
+
+    private async Task<LoanDto> CreateLoanCoreAsync(CreateLoanDto dto, CancellationToken ct)
     {
         // Валідація (базова валідація полів — через DataAnnotations на DTO,
         // на рівні API; тут — бізнес-валідація, якій потрібен контекст)
@@ -66,7 +72,10 @@ public class LoanService : ILoanService
         }
     }
 
-    public async Task ReturnBookAsync(long loanId, long bookId, CancellationToken ct)
+    public Task ReturnBookAsync(long loanId, long bookId, CancellationToken ct) =>
+        _metrics.MeasureAsync("return", () => ReturnBookCoreAsync(loanId, bookId, ct));
+
+    private async Task ReturnBookCoreAsync(long loanId, long bookId, CancellationToken ct)
     {
         using var activity = Source.StartActivity("ReturnBook");
         activity?.SetTag("loan.id", loanId);
@@ -98,7 +107,10 @@ public class LoanService : ILoanService
         }
     }
 
-    public async Task CancelLoanAsync(long loanId, CancellationToken ct)
+    public Task CancelLoanAsync(long loanId, CancellationToken ct) =>
+        _metrics.MeasureAsync("cancel", () => CancelLoanCoreAsync(loanId, ct));
+
+    private async Task CancelLoanCoreAsync(long loanId, CancellationToken ct)
     {
         using var activity = Source.StartActivity("CancelLoan");
         activity?.SetTag("loan.id", loanId);

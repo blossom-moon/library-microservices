@@ -3,7 +3,12 @@ using Library.Reviews.Application.Reviews;
 using Library.Reviews.Infrastructure;
 using Library.Reviews.WebApi.GrpcServices;
 using Library.Reviews.WebApi.Middleware;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using MongoDB.Driver;
+using Library.Reviews.Infrastructure.Messaging;
+using Platform.Messaging;
+using Platform.Messaging.Events;
+using Platform.Messaging.Topology;
 using Platform.ServiceDefaults.Correlation;
 using Platform.ServiceDefaults.GrpcSupport;
 
@@ -25,6 +30,17 @@ var licenseKey = builder.Configuration["LuckyPenny:LicenseKey"];
 
 builder.Services.AddApplication(licenseKey);
 builder.Services.AddInfrastructure(builder.Configuration);
+
+// Лаб. 07: health check MongoDB (критична залежність → Unhealthy; ping із таймаутом 5 с); gRPC Health Checking Protocol
+builder.Services.AddHealthChecks()
+    .AddMongoDb(sp => sp.GetRequiredService<IMongoClient>(), name: "reviews-db",
+        failureStatus: HealthStatus.Unhealthy, tags: ["database", "mongodb", "ready"], timeout: TimeSpan.FromSeconds(5));
+builder.Services.AddGrpcReadinessHealth();
+
+// Лаб. 08: RabbitMQ (IConnection через Aspire, топологія при старті) і споживач черги reviews.catalog-sync
+builder.AddMessaging();
+builder.Services.AddEventConsumer(MessagingTopology.ReviewsQueue, registry => registry
+    .Handle<BookRenamedEvent, BookRenamedHandler>());
 
 builder.Services.AddAutoMapper(cfg =>
 {
@@ -55,6 +71,7 @@ app.UseSwaggerUI();
 
 app.MapControllers();
 app.MapGrpcService<ReviewsGrpcService>();   // контракт Protos/reviews.proto
-app.MapDefaultEndpoints();   // /health (зокрема перевірка MongoDB з AddInfrastructure) і /alive
+app.MapGrpcReadinessHealth();               // grpc.health.v1.Health (Лаб. 07)
+app.MapDefaultEndpoints();                  // /health/live, /health/ready
 
 app.Run();

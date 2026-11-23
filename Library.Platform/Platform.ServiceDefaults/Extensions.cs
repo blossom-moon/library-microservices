@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -99,14 +100,19 @@ public static class Extensions
                 .AddAspNetCoreInstrumentation()
                 .AddHttpClientInstrumentation()
                 .AddRuntimeInstrumentation()
-                // Лаб. 06: власні метрики кешу (cache.hits / cache.misses тощо) — Meter "Library.Catalog.Cache", "Platform.Aggregator.Cache"
-                .AddMeter("Library.*", "Platform.*"))
+                // Лаб. 06–07: власні метрики. Назва Meter відповідає сервісу (Loans.Api, Catalog.Api, Reviews.Api, Aggregator.Api);
+                // "Library.*"/"Platform.*" — метрики кешу (Library.Catalog.Cache, Platform.Aggregator.Cache);
+                // "Polly" — телеметрія resilience (resilience.polly.strategy.events, ...attempt.duration, ...pipeline.duration)
+                .AddMeter("Loans.Api", "Catalog.Api", "Reviews.Api", "Aggregator.Api")
+                .AddMeter("Library.*", "Platform.*")
+                .AddMeter("Polly"))
             .WithTracing(t => t
                 // sampling: 100 % у Development, 10 % у Production
                 .SetSampler(isDevelopment
                     ? new AlwaysOnSampler()
                     : new ParentBasedSampler(new TraceIdRatioBasedSampler(0.1)))
                 .AddSource(builder.Environment.ApplicationName)
+                .AddSource("Platform.Messaging")                                // Лаб. 08: publish/consume через RabbitMQ
                 .AddSource("Library.*", "Platform.*")                           // власні spans бізнес-операцій
                 .AddSource("MongoDB.Driver.Core.Extensions.DiagnosticSources")  // команди MongoDB
                 .AddAspNetCoreInstrumentation(o => o.Filter = ctx =>
@@ -126,18 +132,40 @@ public static class Extensions
 
     public static TBuilder AddDefaultHealthChecks<TBuilder>(this TBuilder builder) where TBuilder : IHostApplicationBuilder
     {
+        // "self" — лише факт, що процес відповідає: без зовнішніх залежностей, тому тег "live" (liveness).
+        // Тег "ready" теж потрібен, щоб readiness-endpoint не був порожнім у сервісів без залежностей (Gateway).
         builder.Services.AddHealthChecks()
-            .AddCheck("self", () => HealthCheckResult.Healthy(), ["live"]);
+            .AddCheck("self", () => HealthCheckResult.Healthy("Process is running."), ["live", "ready"]);
 
         return builder;
     }
 
-    /// <summary>/health — усі перевірки (готовність), /alive — лише "self" (живість). Лише в Development.</summary>
+    /// <summary>
+    /// Endpoints стану (Лаб. 07, частина 3.5):
+    ///   /health/live  — liveness: лише тег "live", без зовнішніх залежностей, надшвидко (збій → оркестратор перезапускає процес);
+    ///   /health/ready — readiness: перевірки з тегом "ready" (БД, Redis, залежності) з деталями у JSON
+    ///                   (збій → оркестратор тимчасово виводить екземпляр із балансування);
+    ///   /health, /alive — повний набір та «self» (сумісність з Лаб. 05–06), лише в Development.
+    /// live/ready доступні в усіх середовищах — їх використовують AppHost/Kubernetes; деталі помилок у тілі — лише в Development.
+    /// </summary>
     public static WebApplication MapDefaultEndpoints(this WebApplication app)
     {
+        app.MapHealthChecks("/health/live", new HealthCheckOptions
+        {
+            Predicate = check => check.Tags.Contains("live"),
+            ResponseWriter = WriteJsonResponse
+        });
+
+        app.MapHealthChecks("/health/ready", new HealthCheckOptions
+        {
+            Predicate = check => check.Tags.Contains("ready"),
+            ResponseWriter = WriteJsonResponse        // деталі кожної перевірки у JSON
+            // ResultStatusCodes за замовчуванням: Healthy 200, Degraded 200 (сервіс працює, але без необов'язкової залежності), Unhealthy 503
+        });
+
         if (app.Environment.IsDevelopment())
         {
-            app.MapHealthChecks(HealthEndpointPath);
+            app.MapHealthChecks(HealthEndpointPath, new HealthCheckOptions { ResponseWriter = WriteJsonResponse });
             app.MapHealthChecks(AlivenessEndpointPath, new HealthCheckOptions
             {
                 Predicate = r => r.Tags.Contains("live")
@@ -145,5 +173,31 @@ public static class Extensions
         }
 
         return app;
+    }
+
+    /// <summary>JSON-відповідь health check: загальний статус і деталі кожної перевірки (ім'я, статус, тривалість, теги, дані).</summary>
+    private static Task WriteJsonResponse(HttpContext context, HealthReport report)
+    {
+        // Тексти винятків можуть містити адреси та рядки підключення — показуємо їх лише в Development
+        var showErrors = context.RequestServices.GetRequiredService<IHostEnvironment>().IsDevelopment();
+
+        var payload = new
+        {
+            status = report.Status.ToString(),
+            totalDurationMs = Math.Round(report.TotalDuration.TotalMilliseconds, 1),
+            checks = report.Entries.Select(e => new
+            {
+                name = e.Key,
+                status = e.Value.Status.ToString(),
+                durationMs = Math.Round(e.Value.Duration.TotalMilliseconds, 1),
+                description = e.Value.Description,
+                tags = e.Value.Tags,
+                data = e.Value.Data.ToDictionary(d => d.Key, d => d.Value),
+                error = showErrors ? e.Value.Exception?.Message : null
+            })
+        };
+
+        context.Response.ContentType = "application/json; charset=utf-8";
+        return context.Response.WriteAsJsonAsync(payload);
     }
 }

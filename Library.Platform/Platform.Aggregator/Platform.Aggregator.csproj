@@ -20,6 +20,9 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <PackageReference Include="Aspire.StackExchange.Redis.DistributedCaching" Version="13.*" />
+    <!-- Лаб. 07: gRPC Health Checking Protocol (клієнт Health.HealthClient) та health check Redis -->
+    <PackageReference Include="Grpc.HealthCheck" Version="2.*" />
+    <PackageReference Include="AspNetCore.HealthChecks.Redis" Version="9.*" />
   </ItemGroup>
 
   <ItemGroup>

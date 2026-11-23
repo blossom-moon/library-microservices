@@ -1,4 +1,198 @@
-# Lab06 — gRPC-виклики та двохрівневе кешування (Memory + Redis)
+# Lab08 — Подієва мікросервісна архітектура з RabbitMQ
+
+Розширення платформи з Lab07: **Каталог** публікує події про зміну книги, а **Видачі** (Lab02) і **Відгуки** (Lab04) оновлюють свої локальні копії даних згідно з політикою дублювання з Лаб. 01.
+
+| Подія (Каталог → брокер) | Хто споживає | Що оновлюється |
+|---|---|---|
+| `BookPriceChangedEvent` (`book.price_changed`) | `loans-api` | `Books.Price` у БД видач; ціни/назви в позиціях `LoanItems` — знімки, **не змінюються** |
+| `BookRenamedEvent` (`book.renamed`) | `loans-api`, `reviews-api` | `Books.Title` у видачах; поле `bookTitle` в усіх відгуках про книгу |
+
+```
+PUT /api/books/{id}/price|title ─► catalog-api ─ SaveChanges ─► publish ─► exchange catalog-events (topic)
+                                                                              ├─ "book.*"       ─► loans.catalog-sync   ─► loans-api   (Books у SQL + ProcessedEvents)
+                                                                              └─ "book.renamed" ─► reviews.catalog-sync ─► reviews-api (bookTitle у MongoDB + processedEvents)
+                                       відхилені/необроблені ─► catalog-events.dlx (direct) ─► <черга>.dlq
+```
+
+## Що де
+| Вимога | Де в коді |
+|---|---|
+| RabbitMQ в AppHost (volume, Management UI) | `Platform.AppHost/AppHost.cs` — `AddRabbitMQ("messaging", password: …).WithDataVolume().WithManagementPlugin(port: 15672)`, `WithReference(rabbit).WaitFor(rabbit)` для catalog/loans/reviews |
+| Aspire.RabbitMQ.Client (7.x), `IConnection`, health check | `Platform.Messaging/MessagingExtensions.cs` — `builder.AddRabbitMQClient("messaging")` (singleton `IConnection`, health check Aspire) + власна перевірка `rabbitmq-connection` (тег `ready`); асинхронний API `IChannel` |
+| Декларативна топологія (topic exchange, черги, bindings, DLX/DLQ) | `Platform.Messaging/Topology/MessagingTopology.cs`; оголошується під час старту (`TopologyInitializer` і `RabbitMqEventConsumer`) |
+| Незмінні integration events (EventId, CorrelationId) | `Platform.Messaging/Events/IntegrationEvent.cs`, `CatalogEvents.cs` — `record` з `init` |
+| `IEventPublisher` + persistent-публікація в JSON | `Platform.Messaging/Publishing/` — `Persistent`, `ContentType`, `MessageId = EventId`, `Type`, `x-correlation-id`, `x-schema-version`; camelCase (`JsonDefaults`) |
+| Публікація лише після збереження змін | `Library.Catalog.Bll/Services/BookService.cs` — `ChangePriceCoreAsync`, `RenameCoreAsync`: `SaveChangesAsync` → `PublishAsync` |
+| Consumer як `BackgroundService`, ручне підтвердження | `Platform.Messaging/Consuming/RabbitMqEventConsumer.cs` — `BasicQos`, `AsyncEventingBasicConsumer`, `autoAck: false`, зупинка через `stoppingToken` |
+| Ack / Nack без requeue | той самий файл: успіх → `BasicAckAsync`; JSON/несумісна версія → `BasicNackAsync(requeue: false)` → DLQ |
+| Ідемпотентні обробники, `ProcessedEvents` | Видачі: `Library.Loans.Bll/Events/*Handler.cs`, `Library.Loans.Dal/Repositories/ProcessedEventRepository.cs`, таблиця в `Platform.AppHost/db/loans-init.sql`; Відгуки: `Library.Reviews.Infrastructure/Messaging/BookRenamedHandler.cs`, колекція `processedEvents` |
+| Репліка даних за політикою Лаб. 01 | Видачі: `BookRepository.UpdatePriceAsync/UpdateTitleAsync`; Відгуки: `UpdateMany` по `bookId`; час останньої застосованої зміни (`PriceChangedAt`, `TitleChangedAt`, `bookTitleSyncedAt`) — захист від out-of-order |
+| Повтори з `x-retry-count`, максимум спроб | `RabbitMqEventConsumer.RetryOrDeadLetterAsync` — повторна публікація зі збільшеним лічильником, оригінал підтверджується; після 3 спроб — DLQ |
+| Передача контексту трасування | `Platform.Messaging/Telemetry/TraceContextPropagation.cs` — W3C `traceparent` (Inject/Extract), Activity `Producer` і `Consumer` з тегами `messaging.*`; `AddSource("Platform.Messaging")` у ServiceDefaults |
+| Структуроване логування збоїв | Serilog `LogContext`: `EventId`, `EventType`, `CorrelationId`, `Queue`; ідентифікатори сутностей — у повідомленнях обробників; метрика `messaging.dlq.depth` (gauge) |
+
+## Запуск
+Як у Lab07, плюс **пароль RabbitMQ** (секрет, у репозиторій не потрапляє):
+```powershell
+cd Platform.AppHost
+dotnet user-secrets set "Parameters:rabbit-password" "<пароль>"
+cd ..
+dotnet run --project Platform.AppHost -p:UseAppHost=false
+```
+У Dashboard має з'явитися ресурс **messaging** (Running). Management UI: **http://localhost:15672**, користувач `guest`, пароль — значення `rabbit-password`. Вкладка *Exchanges*: `catalog-events`, `catalog-events.dlx`; *Queues*: `loans.catalog-sync`, `reviews.catalog-sync` та відповідні `*.dlq`; у *Bindings* exchange `catalog-events` — `book.*` і `book.renamed`.
+
+> Якщо Management UI показує порожній список черг після першого запуску — зачекайте кілька секунд: топологію оголошують сервіси при старті.
+
+## Перевірка (контрольні точки)
+Запити — через Gateway (`http://localhost:5000`); у PowerShell:
+```powershell
+# 1. Зміна ціни: за кілька секунд нова ціна з'являється в Books бази LibraryLoans, ціни в LoanItems не змінюються
+Invoke-RestMethod -Method Put -Uri http://localhost:5000/api/books/1/price -ContentType application/json -Body '{"price":199.99}'
+
+# 2. Перейменування: оновлюється Books.Title у видачах і bookTitle в усіх відгуках про книгу 1
+Invoke-RestMethod -Method Put -Uri http://localhost:5000/api/books/1/title -ContentType application/json -Body '{"title":"Кобзар (нове видання)"}'
+```
+Перевірка даних:
+* Видачі (SQL): `SELECT BookId, Title, Price, PriceChangedAt, TitleChangedAt FROM dbo.Books;` та `SELECT * FROM dbo.ProcessedEvents;`
+* Відгуки (MongoDB, `GET /api/reviews?...` або Dashboard → mongo): `bookTitle` оновлено в усіх документах із `bookId = 1`.
+* Management UI → *Queues*: після публікації повідомлення з'являється й швидко зникає з черг (Ack); `MessageId` = `EventId`, заголовок `x-correlation-id`.
+
+### Сценарії стійкості
+1. **Дублікат події.** Management UI → Exchanges → `catalog-events` → *Publish message*: Routing key `book.renamed`; Properties: `message_id` = `11111111-1111-1111-1111-111111111111`, `type` = `BookRenamedEvent`, `delivery_mode` = `2`; Payload:
+   ```json
+   {"bookId":1,"oldTitle":"A","newTitle":"Дублікат-тест","eventId":"11111111-1111-1111-1111-111111111111","occurredAt":"2026-11-24T12:00:00Z","correlationId":"manual-1","schemaVersion":1}
+   ```
+   Надішліть **двічі**: перша обробка змінює дані, друга — у логах `Duplicate event … skipped`, `ProcessedEvents` містить один запис. Значення `occurredAt` підставте **поточним UTC-часом**: подія зі старішою датою за вже застосовану пропускається як застаріла (`Skipped`), а дата з майбутнього заблокувала б наступні реальні зміни.
+2. **Некоректний JSON → DLQ.** Те саме, але Payload `not a json`, `type` = `BookRenamedEvent`: повідомлення без повторів потрапляє в `loans.catalog-sync.dlq` та `reviews.catalog-sync.dlq` (заголовок `x-death` з причиною `rejected`); у логах `Permanent failure … sending to DLQ`; метрика `messaging.dlq.depth` > 0.
+3. **Обробка після перезапуску `loans-api`.** Зупиніть `loans-api` у Dashboard, змініть кілька цін (запити вище) — повідомлення накопичуються в `loans.catalog-sync` (Management UI → *Ready*). Запустіть `loans-api` — усі події обробляються, лічильник у черзі повертається до 0.
+4. **Тимчасовий збій → повтори.** Зупиніть контейнер `sql`, змініть ціну: у логах `loans-api` — `failed, retry 1/3`, `2/3`, `3/3` (заголовок `x-retry-count`), далі `sending to DLQ`; якщо SQL повернути до вичерпання спроб — подія оброблюється.
+5. **Наскрізний trace.** Dashboard → Traces → запит `PUT /api/books/1/price`: spans `PUT books/{id}/price` → `catalog-events publish` (Producer) → `loans.catalog-sync process` (Consumer) → SQL-команди; у Structured logs фільтр за `CorrelationId`.
+
+## Ключові рішення
+* **Спільна бібліотека `Platform.Messaging`**: події, publisher, consumer, топологія і tracing — в одному місці; сервіси підключають її одним викликом `AddMessaging()` + `AddEventConsumer(queue, …)`.
+* **Вся топологія оголошується кожним учасником** (ідемпотентно). Інакше подія, опублікована до першого запуску споживача, була б втрачена: exchange без bindings відкидає повідомлення.
+* **DLX типу `direct`** з `x-dead-letter-routing-key` = ім'я черги (замість `fanout` із прикладу): кожна DLQ отримує лише повідомлення своєї черги.
+* **Повтор — у ту саму чергу** (default exchange, routing key = ім'я черги), а не в `catalog-events`: інакше копію повтору отримали б усі споживачі.
+* **Тимчасовий vs постійний збій.** Тимчасові (БД недоступна, таймаут) — повтори до 3 разів із паузою 1 с × номер спроби; постійні (`JsonException`, невідома версія схеми, відсутні обов'язкові поля) — одразу в DLQ. Подія, на яку сервіс не підписаний, підтверджується й ігнорується (логується попередження).
+* **Out-of-order.** Кожна зміна копії застосовується лише якщо `OccurredAt` події новіший за останній застосований (окремо для ціни й назви).
+* **Ідемпотентність**: SQL — `EventId` у `ProcessedEvents` (PRIMARY KEY) в одній транзакції зі зміною; MongoDB (автономний сервер без транзакцій) — перевірка `processedEvents` → ідемпотентна зміна → запис `_id = EventId`; збій між кроками дає лише безпечне повторне застосування.
+* **Збій брокера після збереження в БД.** Збережена зміна не скасовується, а втрата події фіксується в логах (`Error … was NOT published`). Повну гарантію доставки дає *Transactional Outbox* (подія записується в таблицю тієї ж БД у тій самій транзакції, окремий фоновий процес публікує її) — не реалізовано (за завданням — за бажанням).
+* **Версіонування схеми**: `schemaVersion` у тілі й заголовку `x-schema-version`; нові поля додаються, наявні не перейменовуються; споживач відхиляє версії новіші за підтримувану.
+* **Обмеження**: події створення/видалення книги не публікуються (не потрібні для сценаріїв завдання; Видачі зберігають історію й `FK` без каскаду).
+
+## Питання до захисту
+* **gRPC чи події?** gRPC — синхронна відповідь потрібна тут і зараз (агрегація). Події — повідомити інших про факт без очікування відповіді, послабити зв'язність, пережити тимчасову недоступність споживача.
+* **Eventual consistency**: копія в іншому сервісі оновлюється не миттєво, а за секунди; джерело істини — Каталог.
+* **Чому події незмінні й самодостатні?** Це факти минулого; споживач не має ходити в Каталог по додаткові дані.
+* **Exchange / queue / binding**: publisher надсилає в exchange з routing key; binding з шаблоном (`*` — одне слово, `#` — будь-яка кількість) спрямовує повідомлення в черги; кожна черга — окремий споживач (fan-out), екземпляри одного сервісу читають одну чергу (competing consumers).
+* **Ідемпотентність** обов'язкова, бо брокер гарантує *at-least-once*: повідомлення може прийти повторно (обрив зʼєднання до Ack).
+* **Чому повтор — це повторна публікація, а не requeue?** Повідомлення, повернене через requeue, приходить без змін — лічильник у заголовку збільшити не можна.
+* **Dead Letter Exchange**: куди RabbitMQ переносить відхилені (Nack requeue:false) повідомлення; зберігає оригінал і заголовок `x-death`; потребує ручного розслідування.
+* **Як працює trace через брокер?** `traceparent` у заголовках повідомлення: publisher — Inject, consumer — Extract і новий Activity `Consumer`, дочірній до span публікації.
+
+---
+
+# Lab07 (попередня робота) — Резильєнтність (Polly), бізнес-метрики та Health Checks
+
+Розширення платформи з Lab06 (Aspire, YARP Gateway, Aggregator на gRPC, Redis-кеш):
+
+* **resilience** для всіх вихідних викликів Aggregator: стандартний обробник (Polly) на кожен клієнт, окремі політики для критичних (Catalog, Loans) і некритичного (Reviews) сервісів, повтори gRPC за статусами;
+* **бізнес-метрики** (`IMeterFactory`): лічильники, гістограми тривалості, `ObservableGauge` — у кожному сервісі;
+* **health checks**: SQL Server, MongoDB, Redis (`Degraded`), gRPC Health Checking Protocol, перевірка залежностей Aggregator; окремі `/health/live` і `/health/ready`;
+* **AppHost**: `WithHttpHealthCheck("/health/ready")` + `WaitFor` — залежні ресурси стартують лише після `Healthy`.
+
+## Що де
+| Вимога | Де в коді |
+|---|---|
+| Standard Resilience Handler для всіх клієнтів | `Platform.ServiceDefaults/Extensions.cs` — `ConfigureHttpClientDefaults(… AddStandardResilienceHandler)` (базовий, для всіх `HttpClient`); у Aggregator клієнти перевизначаються через `RemoveAllResilienceHandlers()` + власний `AddStandardResilienceHandler` — обробники не нашаровуються (`Platform.Aggregator/Resilience/ResilienceExtensions.cs`, `UseResiliencePolicy`) |
+| Повтори gRPC за статусами | `ResilienceExtensions.UseGrpcRetries` — `ServiceConfig` з `RetryPolicy` (`Unavailable`), `MethodName.Default` |
+| Retry / Circuit Breaker / Timeouts | `UseResiliencePolicy`: експоненційна затримка + jitter, `DisableForUnsafeHttpMethods`, `FailureRatio`, `MinimumThroughput`, `SamplingDuration`, `BreakDuration`, `OnRetry`/`OnOpened`/`OnHalfOpened`/`OnClosed`/`OnTimeout` з логуванням (категорія `Polly`) |
+| Різні політики критичних/некритичних | `Platform.Aggregator/Resilience/ResiliencePolicy.cs` (`ResiliencePolicies.Loans/Catalog/Reviews`), підключення — `Platform.Aggregator/Program.cs` |
+| Graceful degradation Redis | `Library.Catalog.Bll/Caching/TwoLevelCache.cs` (L1 → L2 → БД, помилка Redis логується й не ламає запит), `LoanAggregationService` (кеш агрегатів необов'язковий) |
+| Бізнес-метрики | `Library.Loans.Bll/Telemetry/LoanMetrics.cs`, `Library.Catalog.Bll/Telemetry/CatalogMetrics.cs`, `Library.Reviews.Application/Common/Telemetry/ReviewMetrics.cs` + `MetricsBehavior`, `Platform.Aggregator/Telemetry/AggregatorMetrics.cs` |
+| Реєстрація Meter у OpenTelemetry | `Platform.ServiceDefaults/Extensions.cs` — `AddMeter("Loans.Api","Catalog.Api","Reviews.Api","Aggregator.Api")`, `AddMeter("Library.*","Platform.*")`, `AddMeter("Polly")` |
+| Health checks БД | `AddSqlServer` (`loans-db`, `catalog-db`), `AddMongoDb` (`reviews-db`) — теги `database`/`ready`, `timeout` 5 с |
+| Redis health check | `catalog-api` і `aggregator`: `AddRedis(... failureStatus: Degraded)` (`redis-cache`); вбудовану перевірку Aspire вимкнено (`DisableHealthChecks = true`) |
+| gRPC Health Checking Protocol | сервіси: `Platform.ServiceDefaults/GrpcSupport/GrpcHealthExtensions.cs` (`AddGrpcHealthChecks`, `MapGrpcHealthChecksService`); Aggregator: `HealthChecks/GrpcDependencyHealthCheck.cs` (`Health.HealthClient.Check`, дедлайн 2 с) |
+| `/health/live`, `/health/ready` | `Platform.ServiceDefaults/Extensions.cs` — `MapDefaultEndpoints`: доступні в усіх середовищах, JSON-відповідь з деталями кожної перевірки |
+| AppHost | `Platform.AppHost/AppHost.cs` — `WithHttpHealthCheck("/health/ready")`, `WaitFor(...)` |
+
+## Запуск
+Як у Lab06 (`dotnet dev-certs https --trust`, `dotnet user-secrets set "Parameters:sql-password" "<пароль>"` у `Platform.AppHost`, `dotnet run --project Platform.AppHost -p:UseAppHost=false`). У Dashboard → **Resources** усі ресурси мають стати *Healthy* (стовпець *State* / health-значок).
+
+## Політики resilience (Aggregator)
+Для кожного клієнта політика однакова на двох рівнях: HTTP (мережеві збої, таймаути, 5xx/408/429 — Standard Resilience Handler) і gRPC (повтори за статусом у `ServiceConfig`, бо gRPC-статус іде в трейлерах відповіді HTTP 200 і HTTP-обробник його не бачить).
+
+| Параметр | loans-api (критичний) | catalog-api (критичний) | reviews-api (некритичний) | Обґрунтування |
+|---|---|---|---|---|
+| Retry: кількість | 3 | 4 | 1 | Читання ідемпотентні; для критичних — більше спроб, для некритичного швидше здатися й віддати часткову відповідь |
+| Retry: затримка / тип | 200 мс, експоненційна, jitter | 200 мс, експоненційна, jitter | 100 мс, експоненційна, jitter | Експонента знижує навантаження на збійний сервіс; jitter розводить повтори різних клієнтів у часі |
+| Небезпечні методи | `DisableForUnsafeHttpMethods` | те саме | те саме | POST/PUT/DELETE не повторюються — неідемпотентна дія не виконається двічі |
+| Timeout однієї спроби | 3 с | 3 с | 1,5 с | Некритичний сервіс не має права затримувати відповідь |
+| Загальний timeout | 12 с | 15 с | 4 с | ≈ спроби × AttemptTimeout + паузи; узгоджено з retry |
+| Circuit breaker: FailureRatio | 0,3 | 0,3 | 0,7 | Критичний — швидко «розімкнути» й не добивати збійний сервіс; для некритичного — терпимість до окремих збоїв |
+| MinimumThroughput | 10 | 10 | 5 | Мінімум запитів у вікні, щоб рішення було статистично значущим |
+| SamplingDuration | 30 с | 30 с | 15 с | Не менше 2 × AttemptTimeout (вимога Polly) |
+| BreakDuration | 10 с | 10 с | 15 с | Критичним швидше даємо шанс відновитися; некритичному — довша пауза |
+| gRPC retry (MaxAttempts / backoff) | 3 / 200 мс → 2 с ×2 | 4 / 200 мс → 2 с ×2 | 2 / 100 → 500 мс ×2 | Повтор лише для `Unavailable` (транзієнтна недоступність) |
+| gRPC deadline виклику | 8 с | 10 с | 3 с | Усі спроби разом мають вкластися в загальний timeout |
+
+Колбеки Polly логуються (категорія `Polly`): `OnRetry` — Warning, `OnOpened` — Error, `OnHalfOpened` — Warning, `OnClosed` — Information, `OnTimeout` — Error. Polly також публікує метрику `resilience.polly.strategy.events` (`event.name` = `OnRetry`, `OnCircuitOpened`, …) — Meter `Polly` додано в ServiceDefaults.
+
+**Graceful degradation Redis.** Збій Redis не повинен ламати запит: `TwoLevelCache` ловить помилки L2, логує попередження й іде далі до БД (L1/БД залишаються працездатними); Aggregator так само працює без кешу агрегатів. Health check Redis повертає `Degraded` (не `Unhealthy`) — сервіс залишається в ротації.
+
+## Бізнес-метрики
+Кожен клас метрик — **Singleton**, `Meter` створюється через `IMeterFactory` (ім'я Meter — на сервіс). Теги мають низьку кардинальність (операція, результат, транспорт); id сутностей у тегах не використовуються.
+
+| Сервіс (Meter) | Інструмент | Тип | Теги |
+|---|---|---|---|
+| `Loans.Api` | `loans.operations` | Counter | `loans.operation` (create/return/cancel), `loans.result` |
+| | `loans.books.issued` | Counter | — |
+| | `loans.operation.duration` (мс) | Histogram | як `loans.operations` |
+| | `loans.operations.in_flight` | ObservableGauge | — |
+| `Catalog.Api` | `catalog.operations`, `catalog.operation.duration`, `catalog.copies.written_off`, `catalog.operations.in_flight` | Counter / Histogram / Counter / Gauge | `catalog.operation`, `catalog.result` |
+| `Reviews.Api` | `reviews.operations`, `reviews.operation.duration`, `reviews.operations.in_flight` | Counter / Histogram / Gauge | `reviews.operation`, `reviews.kind`, `reviews.result` |
+| `Aggregator.Api` | `aggregator.requests`, `aggregator.dependency.failures`, `aggregator.operation.duration`, `aggregator.requests.in_flight` | Counter / Counter / Histogram / Gauge | `aggregator.transport` (grpc/http), `aggregator.result` (ok/partial/not_found/unavailable/error), `aggregator.dependency` |
+
+Гістограми записують тривалість і успішних, і невдалих операцій (тег `*.result` розрізняє). Перегляд: Dashboard → **Metrics** → ресурс → потрібний Meter.
+
+## Health checks
+| Endpoint | Що перевіряє | Коли 200 / 503 |
+|---|---|---|
+| `/health/live` | лише «процес живий» (перевірка `self`, без залежностей) | 200, поки процес відповідає |
+| `/health/ready` | залежності з тегом `ready`: БД, Redis, downstream-сервіси | `Healthy` і `Degraded` → **200**; `Unhealthy` → **503** |
+| `/health`, `/alive` | усі перевірки / лише live — додатково, **тільки в Development** | |
+
+Відповідь — JSON: `status`, `totalDurationMs`, `checks[]` (`name`, `status`, `durationMs`, `description`, `tags`, `data`; текст помилки — лише в Development).
+
+Перевірки за сервісами:
+* **loans-api** — `loans-db` (SQL, Unhealthy, 5 с);
+* **catalog-api** — `catalog-db` (SQL, Unhealthy), `redis-cache` (Redis, **Degraded**), `cache` (статистика, без тегу `ready`);
+* **reviews-api** — `reviews-db` (MongoDB, Unhealthy);
+* **aggregator** — `loans-api`, `catalog-api` (gRPC Health, **Unhealthy**), `reviews-api` (gRPC Health, **Degraded**), `redis-cache` (**Degraded**).
+
+Усі сервіси також відповідають на `grpc.health.v1.Health/Check` (`Serving`/`NotServing` — за тими ж перевірками з тегом `ready`, звіт оновлюється раз на 10 с). Aggregator викликає `Health.HealthClient.CheckAsync` із дедлайном 2 с.
+
+## Сценарії перевірки
+1. **Усе працює.** `https://localhost:<порт aggregator>/health/ready` → `Healthy`; у Dashboard усі ресурси *Healthy*.
+2. **Зупинка Redis** (Dashboard → redis → Stop): `/health/ready` Aggregator і Catalog → `Degraded`, HTTP **200**; запити `/api/aggregator/loans/1/full` продовжують працювати (без кешу).
+3. **Зупинка reviews-api**: Aggregator `/health/ready` → `Degraded` (reviews), відповідь `/full` — 200 з `warnings`; у логах `Polly` — `OnRetry`, після серії збоїв `OnCircuitOpened` — наступні виклики одразу відхиляються без очікування.
+4. **Сповільнення reviews**: перед запуском AppHost `$env:CHAOS_REVIEWS_DELAY_MS="5000"` → кожен виклик перевищує timeout (дедлайн 3 с) → повтори, `warnings`, відкриття breaker.
+5. **Зупинка loans-api**: Aggregator `/health/ready` → **503** (`Unhealthy`), `/full` → 503.
+6. **Метрики Polly**: Dashboard → Metrics → aggregator → Meter `Polly` → `resilience.polly.strategy.events` (фільтр `event.name`: `OnRetry` / `OnCircuitOpened`).
+7. **Бізнес-метрики**: створіть видачу/зробіть запити до `/api/aggregator/...` → Metrics → `loans.operations`, `aggregator.requests`, `aggregator.operation.duration`.
+
+## Питання до захисту
+* **Чому HTTP-обробник не повторює gRPC-помилки?** gRPC-статус передається в трейлерах відповіді HTTP 200; повтори за статусами налаштовуються в `ServiceConfig` каналу.
+* **Чому `RemoveAllResilienceHandlers`?** Базовий обробник з `ConfigureHttpClientDefaults` додається всім клієнтам; без видалення політики нашаруються (подвійні повтори, два breaker).
+* **Чому `SamplingDuration` ≥ 2 × `AttemptTimeout`?** Вимога валідації Polly: вікно має вміщати кілька спроб.
+* **Чому Redis — `Degraded`, а SQL — `Unhealthy`?** Без кешу сервіс повільніший, але працює; без БД — ні.
+* **Чому liveness не перевіряє залежності?** Інакше збій БД спричинить перезапуск здорового процесу, не виправивши причину.
+* **Чому `DisableForUnsafeHttpMethods`?** Повтор POST може виконати дію двічі.
+
+---
+
+# Lab06 (попередня робота) — gRPC-виклики та двохрівневе кешування (Memory + Redis)
 
 Розширення платформи з Lab05 (.NET Aspire, YARP Gateway, Aggregator, OpenTelemetry, Serilog):
 

@@ -8,6 +8,7 @@ public interface IBookService
     Task<BookCardDto> GetByIdAsync(long id, CancellationToken ct = default);
     Task<BookCardDto> CreateAsync(CreateBookDto input, CancellationToken ct = default);
     Task ChangePriceAsync(long id, decimal newPrice, CancellationToken ct = default);
+    Task RenameAsync(long id, string newTitle, CancellationToken ct = default);
     Task WriteOffAsync(long id, int quantity, CancellationToken ct = default);
     Task DeleteAsync(long id, CancellationToken ct = default);
     Task<IReadOnlyList<BookDto>> GetByCategoryAsync(long categoryId, CancellationToken ct = default);

@@ -23,6 +23,19 @@ CREATE TABLE dbo.Books(
     CONSTRAINT UQ_Books_Isbn UNIQUE NONCLUSTERED (Isbn ASC)
 );';
 
+EXEC [LibraryLoans].sys.sp_executesql N'-- Лаб. 08: поля локальної копії Books, що оновлюються подіями Каталогу (ідемпотентне додавання колонок)
+IF COL_LENGTH(''dbo.Books'', ''Price'') IS NULL
+    ALTER TABLE dbo.Books ADD Price DECIMAL(10,2) NULL, PriceChangedAt DATETIME2(7) NULL, TitleChangedAt DATETIME2(7) NULL;';
+
+EXEC [LibraryLoans].sys.sp_executesql N'-- Лаб. 08: ProcessedEvents — оброблені інтеграційні події (ідемпотентність споживача, унікальний ключ EventId)
+IF OBJECT_ID(''dbo.ProcessedEvents'', ''U'') IS NULL
+CREATE TABLE dbo.ProcessedEvents(
+    EventId     UNIQUEIDENTIFIER NOT NULL,
+    EventType   NVARCHAR(100)    NOT NULL,
+    ProcessedAt DATETIME2(7)     NOT NULL CONSTRAINT DF_ProcessedEvents_At DEFAULT (SYSUTCDATETIME()),
+    CONSTRAINT PK_ProcessedEvents PRIMARY KEY CLUSTERED (EventId ASC)
+);';
+
 EXEC [LibraryLoans].sys.sp_executesql N'-- Readers: читачі бібліотеки (1:N до Loans)
 IF OBJECT_ID(''dbo.Readers'', ''U'') IS NULL
 CREATE TABLE dbo.Readers(

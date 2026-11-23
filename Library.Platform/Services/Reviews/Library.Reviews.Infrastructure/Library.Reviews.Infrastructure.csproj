@@ -14,6 +14,8 @@
   <ItemGroup>
     <ProjectReference Include="..\Library.Reviews.Application\Library.Reviews.Application.csproj" />
     <ProjectReference Include="..\Library.Reviews.Domain\Library.Reviews.Domain.csproj" />
+    <!-- Лаб. 08: події та IEventHandler -->
+    <ProjectReference Include="..\..\..\Platform.Messaging\Platform.Messaging.csproj" />
   </ItemGroup>
 
   <ItemGroup>

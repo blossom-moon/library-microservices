@@ -64,6 +64,8 @@ public static class MongoMappings
             {
                 cm.MapProperty(x => x.BookId).SetElementName("bookId");
                 cm.MapProperty(x => x.BookTitle).SetElementName("bookTitle");
+                cm.MapProperty(x => x.BookTitleSyncedAt).SetElementName("bookTitleSyncedAt")
+                    .SetSerializer(new NullableSerializer<DateTime>(Utc));
                 cm.MapProperty(x => x.Author).SetElementName("author");
                 cm.MapProperty(x => x.Rating).SetElementName("rating");
                 cm.MapProperty(x => x.Text).SetElementName("text");
