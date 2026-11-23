@@ -1,3 +1,5 @@
+using Microsoft.AspNetCore.Authorization;
+using Platform.Security;
 using Grpc.Core;
 using Library.Catalog.Bll.Dto;
 using Library.Catalog.Bll.Interfaces;
@@ -12,6 +14,7 @@ namespace Library.Catalog.Api.GrpcServices;
 /// на RpcException з правильним StatusCode (а не загальний Internal).
 /// Логування викликів — серверний GrpcLoggingInterceptor.
 /// </summary>
+[Authorize(Policy = ApiScopes.CatalogRead)]   // Лаб. 09: M2M — токен Client Credentials зі scope
 public class CatalogGrpcService(IBookService books, ILogger<CatalogGrpcService> logger) : CatalogService.CatalogServiceBase
 {
     private const int MaxBatchSize = 100;

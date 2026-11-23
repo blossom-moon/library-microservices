@@ -1,3 +1,6 @@
+using Platform.Security;
+using Platform.Security.Authentication;
+using Platform.Security.Authorization;
 using Library.Reviews.Application;
 using Library.Reviews.Application.Reviews;
 using Library.Reviews.Infrastructure;
@@ -13,6 +16,7 @@ using Platform.ServiceDefaults.Correlation;
 using Platform.ServiceDefaults.GrpcSupport;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.UseCleartextGrpcPort();   // Лаб. 10: h2c-порт gRPC у Kubernetes (Grpc:Cleartext=true)
 
 // .NET Aspire: Serilog, OpenTelemetry, health checks, service discovery, resilience (Лаб. 05)
 builder.AddServiceDefaults();
@@ -61,6 +65,10 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
+// Лаб. 09: JWT (Local/IdentityServer/Keycloak) + політики дозволів
+builder.AddLibraryAuthentication(ApiResourceNames.Reviews);
+builder.Services.AddLibraryAuthorization();
+
 var app = builder.Build();
 
 app.UseMiddleware<CorrelationIdMiddleware>();   // наскрізний X-Correlation-Id (ServiceDefaults)
@@ -69,6 +77,8 @@ app.UseExceptionHandler();
 app.UseSwagger();
 app.UseSwaggerUI();
 
+app.UseAuthentication();
+app.UseAuthorization();
 app.MapControllers();
 app.MapGrpcService<ReviewsGrpcService>();   // контракт Protos/reviews.proto
 app.MapGrpcReadinessHealth();               // grpc.health.v1.Health (Лаб. 07)

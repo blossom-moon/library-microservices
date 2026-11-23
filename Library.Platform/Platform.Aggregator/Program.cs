@@ -1,3 +1,6 @@
+using Platform.Security.Authentication;
+using Platform.Security.Authorization;
+using Platform.Security.ClientCredentials;
 using System.Text.Json.Serialization;
 using Grpc.Health.V1;
 using Library.Contracts.Catalog;
@@ -16,6 +19,11 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.AddServiceDefaults();   // Serilog, OpenTelemetry (+Polly meter), health checks, service discovery, стандартний resilience-обробник для ВСІХ клієнтів
 
+// Лаб. 09: вхідні токени (Local/IdentityServer/Keycloak) та вихідний токен Client Credentials до downstream-сервісів
+builder.AddLibraryAuthentication();
+builder.Services.AddLibraryAuthorization();
+builder.Services.AddClientCredentials(builder.Configuration);
+
 // Redis (L2) для кешу агрегованих відповідей: ім'я "redis" = ресурс AppHost (ConnectionStrings:redis).
 // Вбудовану перевірку Aspire вимкнено: Redis — необов'язкова залежність, тому власна перевірка нижче дає Degraded, а не Unhealthy.
 builder.AddRedisDistributedCache("redis", settings => settings.DisableHealthChecks = true);
@@ -26,23 +34,30 @@ builder.Services.AddSingleton<AggregatorMetrics>();   // Лаб. 07: бізне�
 // Resilience (Лаб. 07): стандартний обробник уже діє з ServiceDefaults; для кожного клієнта його ЗАМІНЕНО власним
 // (RemoveAllResilienceHandlers + AddStandardResilienceHandler у UseResiliencePolicy) — обробники не нашаровуються.
 // Повтори за gRPC-статусами (Unavailable) — вбудована retry-політика каналу (UseGrpcRetries).
-builder.Services.AddGrpcClient<CatalogService.CatalogServiceClient>(o => o.Address = new Uri("https://catalog-api"))
+// Лаб. 10: у Kubernetes gRPC — cleartext HTTP/2 на іменованому endpoint "grpc" (services__<ім'я>__grpc__0); локально — https
+var grpcCleartext = builder.Configuration.GetValue<bool>("Grpc:Cleartext");
+string GrpcAddress(string service) => grpcCleartext ? $"http://_grpc.{service}" : $"https://{service}";
+
+builder.Services.AddGrpcClient<CatalogService.CatalogServiceClient>(o => o.Address = new Uri(GrpcAddress("catalog-api")))
     .AllowDevelopmentCertificate(builder.Environment)
     .UseResiliencePolicy(ResiliencePolicies.Catalog)     // критичний
+    .AddHttpMessageHandler<ClientCredentialsTokenHandler>()   // Bearer-токен Client Credentials
     .UseGrpcRetries(ResiliencePolicies.Catalog);
-builder.Services.AddGrpcClient<LoansService.LoansServiceClient>(o => o.Address = new Uri("https://loans-api"))
+builder.Services.AddGrpcClient<LoansService.LoansServiceClient>(o => o.Address = new Uri(GrpcAddress("loans-api")))
     .AllowDevelopmentCertificate(builder.Environment)
     .UseResiliencePolicy(ResiliencePolicies.Loans)       // критичний
+    .AddHttpMessageHandler<ClientCredentialsTokenHandler>()   // Bearer-токен Client Credentials
     .UseGrpcRetries(ResiliencePolicies.Loans);
-builder.Services.AddGrpcClient<ReviewsService.ReviewsServiceClient>(o => o.Address = new Uri("https://reviews-api"))
+builder.Services.AddGrpcClient<ReviewsService.ReviewsServiceClient>(o => o.Address = new Uri(GrpcAddress("reviews-api")))
     .AllowDevelopmentCertificate(builder.Environment)
     .UseResiliencePolicy(ResiliencePolicies.Reviews)     // некритичний
+    .AddHttpMessageHandler<ClientCredentialsTokenHandler>()   // Bearer-токен Client Credentials
     .UseGrpcRetries(ResiliencePolicies.Reviews);
 
 // ---- gRPC Health Checking Protocol: клієнти для перевірки залежностей (без повторів і breaker — перевірка має показувати реальний стан) ----
 foreach (var (clientName, address) in new[]
 {
-    ("loans-health", "https://loans-api"), ("catalog-health", "https://catalog-api"), ("reviews-health", "https://reviews-api")
+    ("loans-health", GrpcAddress("loans-api")), ("catalog-health", GrpcAddress("catalog-api")), ("reviews-health", GrpcAddress("reviews-api"))
 })
 {
     builder.Services.AddGrpcClient<Health.HealthClient>(clientName, o => o.Address = new Uri(address))
@@ -52,11 +67,14 @@ foreach (var (clientName, address) in new[]
 
 // ---- Лаб. 05 (LEGACY, лише для порівняння тривалості): HTTP-клієнти (звичайний HTTP-endpoint, без TLS) ----
 builder.Services.AddHttpClient<LoansClient>(c => c.BaseAddress = new("http://loans-api"))
-    .UseResiliencePolicy(ResiliencePolicies.Loans);
+    .UseResiliencePolicy(ResiliencePolicies.Loans)
+    .AddHttpMessageHandler<ClientCredentialsTokenHandler>();
 builder.Services.AddHttpClient<CatalogClient>(c => c.BaseAddress = new("http://catalog-api"))
-    .UseResiliencePolicy(ResiliencePolicies.Catalog);
+    .UseResiliencePolicy(ResiliencePolicies.Catalog)
+    .AddHttpMessageHandler<ClientCredentialsTokenHandler>();
 builder.Services.AddHttpClient<ReviewsClient>(c => c.BaseAddress = new("http://reviews-api"))
-    .UseResiliencePolicy(ResiliencePolicies.Reviews);
+    .UseResiliencePolicy(ResiliencePolicies.Reviews)
+    .AddHttpMessageHandler<ClientCredentialsTokenHandler>();
 
 builder.Services.AddScoped<LoanAggregationService>();       // gRPC + Redis-кеш
 builder.Services.AddScoped<HttpLoanAggregationService>();   // HTTP (Лаб. 05)
@@ -92,6 +110,8 @@ ResilienceExtensions.LoggerFactory = app.Services.GetRequiredService<ILoggerFact
 
 app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseExceptionHandler();
+app.UseAuthentication();
+app.UseAuthorization();
 app.MapControllers();
 app.MapDefaultEndpoints();   // /health/live, /health/ready (+ /health і /alive у Development)
 

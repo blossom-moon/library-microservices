@@ -1,0 +1,45 @@
+# SQL Server для ручного розгортання (в Частині 1 його створює aspirate). Пароль SA — у Secret sql-secrets (create-secrets.ps1).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sql-server
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: sql-server }
+  template:
+    metadata:
+      labels: { app: sql-server }
+    spec:
+      containers:
+      - name: sql-server
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        ports:
+        - containerPort: 1433
+        env:
+        - { name: ACCEPT_EULA, value: "Y" }
+        - name: MSSQL_SA_PASSWORD
+          valueFrom:
+            secretKeyRef: { name: sql-secrets, key: MSSQL_SA_PASSWORD }
+        readinessProbe:
+          tcpSocket: { port: 1433 }
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        resources:
+          requests: { memory: 1Gi }
+          limits: { memory: 2Gi }
+        volumeMounts:
+        - { name: data, mountPath: /var/opt/mssql }
+      volumes:
+      - name: data
+        emptyDir: {}            # дані зникають разом із подом (для навчального стенду)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sql-server
+spec:
+  selector: { app: sql-server }
+  ports:
+  - { port: 1433, targetPort: 1433 }

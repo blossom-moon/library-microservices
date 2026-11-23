@@ -1,0 +1,18 @@
+# Відкриті (несекретні) налаштування Gateway. Подвійне підкреслення = двокрапка в конфігурації .NET:
+# services__catalog-api__http__0 → services:catalog-api:http:0 — той самий формат, у якому Aspire передавав адреси (Лаб. 05),
+# тому код Gateway не змінюється: YARP-кластери "http://catalog-api" розв'язуються service discovery за цими ключами.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+data:
+  ASPNETCORE_ENVIRONMENT: "Production"
+  services__catalog-api__http__0: "http://catalog-api"      # DNS-ім'я Service (порт 80)
+  services__loans-api__http__0: "http://loans-api"
+  services__reviews-api__http__0: "http://reviews-api"
+  services__aggregator__http__0: "http://aggregator"
+  services__auth-api__http__0: "http://auth-api"
+  services__payments-api__http__0: "http://payments-api"
+  # Лаб. 09: параметри перевірки власних JWT (ключ підпису — у Secret gateway-secrets)
+  Jwt__Issuer: "library-auth"
+  Jwt__Audience: "library-api"

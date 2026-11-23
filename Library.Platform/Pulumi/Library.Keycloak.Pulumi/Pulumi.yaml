@@ -1,0 +1,3 @@
+name: library-keycloak
+runtime: dotnet
+description: Keycloak realm LibraryRealm — Infrastructure as Code (Лаб. 09, Частина 3)

@@ -1,3 +1,5 @@
+using Microsoft.AspNetCore.Authorization;
+using Platform.Security;
 using FluentValidation;
 using Grpc.Core;
 using Library.Contracts.Reviews;
@@ -13,6 +15,7 @@ namespace Library.Reviews.WebApi.GrpcServices;
 /// gRPC-адаптер над CQRS-запитами (той самий GetReviewsListQuery, що й у REST-контролері): вхідні дані
 /// перевіряються, винятки перетворюються на RpcException (InvalidArgument / NotFound / Unavailable).
 /// </summary>
+[Authorize(Policy = ApiScopes.ReviewsRead)]   // Лаб. 09: M2M — токен Client Credentials зі scope
 public class ReviewsGrpcService(ISender sender, IConfiguration configuration) : ReviewsService.ReviewsServiceBase
 {
     // Лише для демонстрації стійкості (Лаб. 07): Chaos:DelayMs > 0 штучно сповільнює відповідь,

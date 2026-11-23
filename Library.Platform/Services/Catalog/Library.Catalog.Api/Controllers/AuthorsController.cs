@@ -1,3 +1,5 @@
+using Platform.Security;
+using Platform.Security.Authorization;
 using Library.Catalog.Bll.Dto;
 using Library.Catalog.Bll.Interfaces;
 using Microsoft.AspNetCore.Mvc;
@@ -12,12 +14,15 @@ public class AuthorsController : ApiControllerBase
 
     public AuthorsController(IAuthorService service) => _service = service;
 
+    [RequirePermission(Permissions.Catalog.Read)]
+
     [HttpGet]
     [ProducesResponseType(typeof(IReadOnlyList<AuthorDto>), StatusCodes.Status200OK)]
     public async Task<ActionResult<IReadOnlyList<AuthorDto>>> GetAll(CancellationToken ct)
         => Ok(await _service.GetAllAsync(ct));
 
     /// <summary>Автор із книгами (Explicit Loading: два запити).</summary>
+    [RequirePermission(Permissions.Catalog.Read)]
     [HttpGet("{id:long}")]
     [ProducesResponseType(typeof(AuthorWithBooksDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -25,6 +30,7 @@ public class AuthorsController : ApiControllerBase
         => Ok(await _service.GetWithBooksAsync(id, ct));
 
     /// <summary>Книги автора, додані після дати (LINQ через проміжну сутність BookAuthor.AddedAt).</summary>
+    [RequirePermission(Permissions.Catalog.Read)]
     [HttpGet("{id:long}/books")]
     [ProducesResponseType(typeof(IReadOnlyList<BookShortDto>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

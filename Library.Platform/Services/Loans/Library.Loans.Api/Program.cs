@@ -1,3 +1,7 @@
+using Library.Loans.Api.Database;
+using Platform.Security;
+using Platform.Security.Authentication;
+using Platform.Security.Authorization;
 using AutoMapper;
 using Library.Loans.Api.GrpcServices;
 using Library.Loans.Bll;
@@ -16,6 +20,7 @@ using Platform.ServiceDefaults.Correlation;
 using Platform.ServiceDefaults.GrpcSupport;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.UseCleartextGrpcPort();   // Лаб. 10: h2c-порт gRPC у Kubernetes (Grpc:Cleartext=true)
 
 // .NET Aspire: Serilog, OpenTelemetry, health checks, service discovery, resilience (Лаб. 05)
 builder.AddServiceDefaults();
@@ -60,7 +65,16 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddExceptionHandler<Library.Loans.Api.Middleware.GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
+// Лаб. 09: JWT (Local/IdentityServer/Keycloak) + політики дозволів
+builder.AddLibraryAuthentication(ApiResourceNames.Loans);
+builder.Services.AddLibraryAuthorization();
+
 var app = builder.Build();
+
+// Лаб. 10: створення БД і схеми при старті в Kubernetes (в Aspire це робить WithCreationScript; скрипт ідемпотентний)
+if (app.Configuration.GetValue<bool>("Database:InitializeOnStartup"))
+    await LoansDatabaseInitializer.RunAsync(connectionString, app.Logger);
+
 app.UseMiddleware<CorrelationIdMiddleware>();   // наскрізний X-Correlation-Id (ServiceDefaults)
 
 if (app.Environment.IsDevelopment())
@@ -72,6 +86,7 @@ if (app.Environment.IsDevelopment())
 app.UseExceptionHandler(); // глобальна обробка через ProblemDetails-middleware (Крок 22)
 if (!app.Environment.IsDevelopment())
     app.UseHttpsRedirection();   // у Development TLS не потрібен: сервіс слухає HTTP за Aspire/Gateway
+app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 app.MapGrpcService<LoansGrpcService>();   // контракт Protos/loans.proto

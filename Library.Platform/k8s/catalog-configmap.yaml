@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: catalog-config
+data:
+  # Staging, а не Production: у Production початкове наповнення (Seeding) вимкнено, і /api/books повертав би порожній список
+  ASPNETCORE_ENVIRONMENT: "Staging"
+  ConnectionStrings__redis: "redis:6379"          # DNS-ім'я Service Redis
+  Grpc__Cleartext: "true"                          # REST на 8080, gRPC (HTTP/2) на 8081
+  Jwt__Issuer: "library-auth"
+  Jwt__Audience: "library-api"

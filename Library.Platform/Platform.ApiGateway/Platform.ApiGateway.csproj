@@ -9,6 +9,7 @@
   <ItemGroup>
     <!-- Gateway залежить лише від ServiceDefaults (рішення розв'язує адреси через service discovery) -->
     <ProjectReference Include="..\Platform.ServiceDefaults\Platform.ServiceDefaults.csproj" />
+    <ProjectReference Include="..\Platform.Security\Platform.Security.csproj" />
   </ItemGroup>
 
   <ItemGroup>

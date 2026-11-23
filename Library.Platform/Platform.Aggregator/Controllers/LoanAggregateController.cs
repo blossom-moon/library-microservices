@@ -6,6 +6,7 @@ using Platform.Aggregator.Telemetry;
 namespace Platform.Aggregator.Controllers;
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize]
 [Route("api/aggregator")]
 public class LoanAggregateController(
     LoanAggregationService grpcService, HttpLoanAggregationService httpService, AggregatorMetrics metrics) : ControllerBase
