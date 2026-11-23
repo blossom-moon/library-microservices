@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="Library.Reviews.Domain/Library.Reviews.Domain.csproj" />
+  <Project Path="Library.Reviews.Application/Library.Reviews.Application.csproj" />
+  <Project Path="Library.Reviews.Infrastructure/Library.Reviews.Infrastructure.csproj" />
+  <Project Path="Library.Reviews.WebApi/Library.Reviews.WebApi.csproj" />
+  <Project Path="Library.Reviews.Tests/Library.Reviews.Tests.csproj" />
+</Solution>
