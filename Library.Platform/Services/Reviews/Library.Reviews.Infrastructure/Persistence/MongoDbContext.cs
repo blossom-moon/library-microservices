@@ -8,6 +8,7 @@ namespace Library.Reviews.Infrastructure.Persistence;
 /// <summary>Єдина точка доступу до MongoDB. Налаштування приходять через IOptions.</summary>
 public class MongoDbContext
 {
+    public IMongoClient Client { get; }
     public IMongoDatabase Database { get; }
     public IMongoCollection<Review> Reviews { get; }
     public IMongoCollection<Discussion> Discussions { get; }
@@ -22,8 +23,8 @@ public class MongoDbContext
         // Лаб. 05: підписка драйвера на трасування — кожна команда MongoDB стає span в OpenTelemetry
         var settings = MongoClientSettings.FromConnectionString(o.ConnectionString);
         settings.ClusterConfigurator = cb => cb.Subscribe(new DiagnosticsActivityEventSubscriber());
-        var client = new MongoClient(settings);
-        Database = client.GetDatabase(o.DatabaseName);
+        Client = new MongoClient(settings);
+        Database = Client.GetDatabase(o.DatabaseName);
 
         ReviewsCollectionName = o.ReviewsCollection;
         Reviews = Database.GetCollection<Review>(o.ReviewsCollection);

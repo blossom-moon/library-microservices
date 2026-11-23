@@ -17,6 +17,20 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Лаб. 06: gRPC-сервер (містить Google.Protobuf і Grpc.Tools) та Redis як IDistributedCache через Aspire -->
+    <PackageReference Include="Grpc.AspNetCore" Version="2.*" />
+    <PackageReference Include="Aspire.StackExchange.Redis.DistributedCaching" Version="13.*" />
+    <!-- Лаб. 07: health checks SQL Server і Redis -->
+    <PackageReference Include="AspNetCore.HealthChecks.SqlServer" Version="9.*" />
+    <PackageReference Include="AspNetCore.HealthChecks.Redis" Version="9.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Контракт — сервер (Aggregator підключає цей самий файл як Client) -->
+    <Protobuf Include="Protos\catalog.proto" GrpcServices="Server" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Library.Catalog.Bll\Library.Catalog.Bll.csproj" />
     <ProjectReference Include="..\..\..\Platform.ServiceDefaults\Platform.ServiceDefaults.csproj" />
   </ItemGroup>
