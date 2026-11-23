@@ -1,0 +1,11 @@
+bin/
+obj/
+.vs/
+.idea/
+*.user
+*.suo
+secrets.json
+
+# Pulumi / локальні результати
+matrix-result.csv
+Pulumi.*.yaml.bak
