@@ -34,17 +34,21 @@ builder.Services.AddSingleton<AggregatorMetrics>();   // Лаб. 07: бізне�
 // Resilience (Лаб. 07): стандартний обробник уже діє з ServiceDefaults; для кожного клієнта його ЗАМІНЕНО власним
 // (RemoveAllResilienceHandlers + AddStandardResilienceHandler у UseResiliencePolicy) — обробники не нашаровуються.
 // Повтори за gRPC-статусами (Unavailable) — вбудована retry-політика каналу (UseGrpcRetries).
-builder.Services.AddGrpcClient<CatalogService.CatalogServiceClient>(o => o.Address = new Uri("https://catalog-api"))
+// Лаб. 10: у Kubernetes gRPC — cleartext HTTP/2 на іменованому endpoint "grpc" (services__<ім'я>__grpc__0); локально — https
+var grpcCleartext = builder.Configuration.GetValue<bool>("Grpc:Cleartext");
+string GrpcAddress(string service) => grpcCleartext ? $"http://_grpc.{service}" : $"https://{service}";
+
+builder.Services.AddGrpcClient<CatalogService.CatalogServiceClient>(o => o.Address = new Uri(GrpcAddress("catalog-api")))
     .AllowDevelopmentCertificate(builder.Environment)
     .UseResiliencePolicy(ResiliencePolicies.Catalog)     // критичний
     .AddHttpMessageHandler<ClientCredentialsTokenHandler>()   // Bearer-токен Client Credentials
     .UseGrpcRetries(ResiliencePolicies.Catalog);
-builder.Services.AddGrpcClient<LoansService.LoansServiceClient>(o => o.Address = new Uri("https://loans-api"))
+builder.Services.AddGrpcClient<LoansService.LoansServiceClient>(o => o.Address = new Uri(GrpcAddress("loans-api")))
     .AllowDevelopmentCertificate(builder.Environment)
     .UseResiliencePolicy(ResiliencePolicies.Loans)       // критичний
     .AddHttpMessageHandler<ClientCredentialsTokenHandler>()   // Bearer-токен Client Credentials
     .UseGrpcRetries(ResiliencePolicies.Loans);
-builder.Services.AddGrpcClient<ReviewsService.ReviewsServiceClient>(o => o.Address = new Uri("https://reviews-api"))
+builder.Services.AddGrpcClient<ReviewsService.ReviewsServiceClient>(o => o.Address = new Uri(GrpcAddress("reviews-api")))
     .AllowDevelopmentCertificate(builder.Environment)
     .UseResiliencePolicy(ResiliencePolicies.Reviews)     // некритичний
     .AddHttpMessageHandler<ClientCredentialsTokenHandler>()   // Bearer-токен Client Credentials
@@ -53,7 +57,7 @@ builder.Services.AddGrpcClient<ReviewsService.ReviewsServiceClient>(o => o.Addre
 // ---- gRPC Health Checking Protocol: клієнти для перевірки залежностей (без повторів і breaker — перевірка має показувати реальний стан) ----
 foreach (var (clientName, address) in new[]
 {
-    ("loans-health", "https://loans-api"), ("catalog-health", "https://catalog-api"), ("reviews-health", "https://reviews-api")
+    ("loans-health", GrpcAddress("loans-api")), ("catalog-health", GrpcAddress("catalog-api")), ("reviews-health", GrpcAddress("reviews-api"))
 })
 {
     builder.Services.AddGrpcClient<Health.HealthClient>(clientName, o => o.Address = new Uri(address))

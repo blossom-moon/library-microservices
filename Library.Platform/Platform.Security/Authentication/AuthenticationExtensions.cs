@@ -37,6 +37,10 @@ public static class AuthenticationExtensions
 
         var jwt = config.GetSection(JwtSettings.SectionName).Get<JwtSettings>() ?? new JwtSettings();
         var identityServerAuthority = config["IdentityServer:Authority"]?.TrimEnd('/');
+        // Лаб. 10: у Kubernetes Authority — внутрішня адреса (http://identityserver:8080), а iss токена — IssuerUri сервера
+        var identityServerIssuer = config["IdentityServer:Issuer"]?.TrimEnd('/') ?? identityServerAuthority;
+        // Лаб. 10: у кластері метадані IdentityServer читаються по HTTP (TLS на межі кластера — Ingress)
+        var requireHttpsMetadata = config.GetValue<bool?>("Security:RequireHttpsMetadata") ?? !isDevelopment;
         var keycloakAuthority = config["Keycloak:Authority"]?.TrimEnd('/');
 
         builder.Services.Configure<JwtSettings>(config.GetSection(JwtSettings.SectionName));
@@ -51,7 +55,7 @@ public static class AuthenticationExtensions
 
         auth.AddPolicyScheme(SmartScheme, "Local / IdentityServer / Keycloak", o =>
         {
-            o.ForwardDefaultSelector = ctx => SelectScheme(ctx, jwt, identityServerAuthority, keycloakAuthority);
+            o.ForwardDefaultSelector = ctx => SelectScheme(ctx, jwt, identityServerIssuer, keycloakAuthority);
         });
 
         if (jwt.IsConfigured)
@@ -83,7 +87,7 @@ public static class AuthenticationExtensions
             auth.AddJwtBearer(IdentityServerScheme, o =>
             {
                 o.Authority = identityServerAuthority;               // ключі підпису — з /.well-known/openid-configuration
-                o.RequireHttpsMetadata = !isDevelopment;
+                o.RequireHttpsMetadata = requireHttpsMetadata;
                 o.MapInboundClaims = false;
                 o.TokenValidationParameters = new TokenValidationParameters
                 {
@@ -100,7 +104,7 @@ public static class AuthenticationExtensions
             auth.AddJwtBearer(KeycloakScheme, o =>
             {
                 o.Authority = keycloakAuthority;                     // http://localhost:8080/realms/LibraryRealm
-                o.RequireHttpsMetadata = !isDevelopment;             // Keycloak у розробці — HTTP
+                o.RequireHttpsMetadata = requireHttpsMetadata;             // Keycloak у розробці — HTTP
                 o.MapInboundClaims = false;
                 o.TokenValidationParameters = new TokenValidationParameters
                 {

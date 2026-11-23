@@ -28,4 +28,9 @@
     <ProjectReference Include="..\..\..\Platform.Security\Platform.Security.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Лаб. 10: той самий скрипт, що й у WithCreationScript (AppHost), вбудований у збірку -->
+    <EmbeddedResource Include="..\..\..\Platform.AppHost\db\loans-init.sql" LogicalName="loans-init.sql" />
+  </ItemGroup>
+
 </Project>

@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: catalog-api }
+  template:
+    metadata:
+      labels: { app: catalog-api }
+    spec:
+      containers:
+      - name: catalog-api
+        image: catalog-api:v1
+        imagePullPolicy: IfNotPresent          # локальний образ із Docker Desktop (без реєстру)
+        ports:
+        - { name: http, containerPort: 8080 }
+        - { name: grpc, containerPort: 8081 }
+        envFrom:
+        - configMapRef:
+            name: catalog-config               # відкриті налаштування
+        - secretRef:
+            name: catalog-secrets              # рядок підключення до БД, RabbitMQ, ключ JWT
+        livenessProbe:                         # збій → перезапуск контейнера
+          httpGet: { path: /health/live, port: 8080 }
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:                        # збій → под виключається з Service (без перезапуску)
+          httpGet: { path: /health/ready, port: 8080 }
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        resources:
+          requests: { cpu: 100m, memory: 192Mi }
+          limits: { memory: 512Mi }

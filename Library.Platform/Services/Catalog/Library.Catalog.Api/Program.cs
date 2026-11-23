@@ -22,6 +22,7 @@ using Platform.ServiceDefaults.Correlation;
 using Platform.ServiceDefaults.GrpcSupport;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.UseCleartextGrpcPort();   // Лаб. 10: h2c-порт gRPC у Kubernetes (Grpc:Cleartext=true)
 
 // ---- .NET Aspire: Serilog, OpenTelemetry, health checks, service discovery (Лаб. 05) ----
 builder.AddServiceDefaults();

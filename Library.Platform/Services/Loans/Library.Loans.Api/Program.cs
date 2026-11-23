@@ -1,3 +1,4 @@
+using Library.Loans.Api.Database;
 using Platform.Security;
 using Platform.Security.Authentication;
 using Platform.Security.Authorization;
@@ -19,6 +20,7 @@ using Platform.ServiceDefaults.Correlation;
 using Platform.ServiceDefaults.GrpcSupport;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.UseCleartextGrpcPort();   // Лаб. 10: h2c-порт gRPC у Kubernetes (Grpc:Cleartext=true)
 
 // .NET Aspire: Serilog, OpenTelemetry, health checks, service discovery, resilience (Лаб. 05)
 builder.AddServiceDefaults();
@@ -68,6 +70,11 @@ builder.AddLibraryAuthentication(ApiResourceNames.Loans);
 builder.Services.AddLibraryAuthorization();
 
 var app = builder.Build();
+
+// Лаб. 10: створення БД і схеми при старті в Kubernetes (в Aspire це робить WithCreationScript; скрипт ідемпотентний)
+if (app.Configuration.GetValue<bool>("Database:InitializeOnStartup"))
+    await LoansDatabaseInitializer.RunAsync(connectionString, app.Logger);
+
 app.UseMiddleware<CorrelationIdMiddleware>();   // наскрізний X-Correlation-Id (ServiceDefaults)
 
 if (app.Environment.IsDevelopment())

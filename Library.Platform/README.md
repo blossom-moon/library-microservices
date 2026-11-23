@@ -1,3 +1,121 @@
+# Lab10 — Розгортання мікросервісів у Kubernetes: Aspir8 (aspirate) і ручний деплой
+
+Платформа Lab05–Lab09 розгортається в локальному кластері Docker Desktop двома способами: маніфести генеруються з AppHost інструментом **aspirate**, а `gateway` і `catalog-api` додатково розгортаються з власних Dockerfile та YAML.
+Приклад із завдання `/api/products` у цій платформі — `/api/books` (Каталог).
+
+## Що де
+| Вимога | Реалізація |
+|---|---|
+| Маніфести всієї платформи з AppHost (`aspirate-output`, без відкритих секретів) | `Platform.AppHost` → `aspirate generate`; секрети шифруються паролем aspirate, `.gitignore` виключає `aspirate-state.json`, `*.secrets` |
+| Багатоетапні Dockerfile (restore окремим шаром, SDK → aspnet) | `Services/Catalog/Library.Catalog.Api/Dockerfile`, `Platform.ApiGateway/Dockerfile` (контекст збірки — корінь `Library.Platform`), `.dockerignore` |
+| Deployment: 2 репліки, `imagePullPolicy: IfNotPresent`, `containerPort: 8080`, проби `/health/live` та `/health/ready` | `k8s/catalog-api-deployment.yaml`, `k8s/gateway-deployment.yaml` |
+| ClusterIP Service зі стабільним DNS-іменем (selector, port → targetPort 8080) | `k8s/catalog-api-service.yaml`, `k8s/gateway-service.yaml` |
+| ConfigMap з адресами сервісів (`services__<ім'я>__http__0`) | `k8s/gateway-configmap.yaml`, `k8s/catalog-configmap.yaml`; підключення `envFrom: configMapRef` |
+| Secrets поза репозиторієм (`kubectl create secret`), `envFrom: secretRef` | `k8s/create-secrets.ps1` (значення зі змінних оточення), `catalog-secrets`, `gateway-secrets` |
+| Health endpoints у всіх середовищах | `Platform.ServiceDefaults/Extensions.cs` — `/health/live` і `/health/ready` реєструються без умови `IsDevelopment` (Лаб. 07); `/health` і `/alive` — лише Development |
+| Інфраструктура для ручного деплою (SQL Server, Redis, RabbitMQ) | `k8s/infra/*.yaml`; у Частині 1 їх створює aspirate |
+
+## Що змінено в коді для Kubernetes
+| Проблема в кластері | Рішення |
+|---|---|
+| gRPC (HTTP/2) без TLS не узгоджується на порту з HTTP/1.1 (REST, проби kubelet) | `Platform.ServiceDefaults/GrpcSupport/GrpcCleartextExtensions.cs`: за `Grpc__Cleartext=true` Kestrel слухає **8080** (HTTP/1.1: REST + проби) і **8081** (HTTP/2: gRPC) |
+| Aggregator викликав `https://loans-api` (dev-сертифікат) | Адреси gRPC-клієнтів — `http://_grpc.<сервіс>` (іменований endpoint `grpc`, ключ `services__<сервіс>__grpc__0`) за `Grpc__Cleartext=true`; локально — як раніше |
+| aspirate створює лише контейнер SQL Server, не БД | `LoansDatabaseInitializer` виконує вбудований `loans-init.sql` (той самий файл, що в `WithCreationScript`) за `Database__InitializeOnStartup=true`; Каталог, Auth, IdentityServer створюють схему міграціями |
+| `IdentityServer:Authority` = `localhost:5400` недосяжний з пода | У publish-режимі Authority = `http://identityserver:8080`, `IdentityServer:Issuer` = `http://localhost:5400` (iss токена), `Security:RequireHttpsMetadata=false` |
+| Gateway: порт 5000 — лише локальний | У publish-режимі фіксований endpoint не створюється; Service `gateway` відкриває порт 8080 пода |
+| Другий SQL Server і Keycloak надто важкі для локального кластера | Publish-режим: IdentityServerDb на тому самому SQL Server; Keycloak не розгортається |
+
+Режим визначається `builder.ExecutionContext.IsPublishMode` у `Platform.AppHost/AppHost.cs`; локальний запуск (`dotnet run` AppHost) не змінюється.
+
+## Частина 1. Aspir8
+```powershell
+kubectl version --client
+kubectl config use-context docker-desktop
+dotnet tool install -g aspirate
+
+cd Platform.AppHost                # не корінь рішення
+aspirate init                      # реєстр образів і тег (локально: порожній реєстр, тег v1)
+aspirate generate                  # збирає образи й створює ./aspirate-output; запитує пароль для шифрування секретів
+aspirate apply                     # або: kubectl apply -k ./aspirate-output
+
+kubectl get pods -w
+kubectl get services
+kubectl logs deploy/gateway
+kubectl port-forward service/gateway 8080:8080     # порт сервісу — з kubectl get services
+```
+Для захищених маршрутів потрібен токен (Лаб. 09): `$env:JWT_SECRET = '<значення Parameters:jwt-secret, яке введено для aspirate>'; $t = ./scripts/make-jwt.ps1; curl.exe -H "Authorization: Bearer $t" http://localhost:8080/api/books`.
+Секретні параметри AppHost (`sql-password`, `rabbit-password`, `jwt-secret`, `aggregator-client-secret`) aspirate запитує під час `generate`.
+Перед комітом `aspirate-output` перевірити: `Select-String -Path .\aspirate-output -Pattern 'password|secret' -Recurse` — відкритих значень бути не повинно.
+Після перевірки: `aspirate destroy`.
+
+**Сумісність aspirate з Aspire 13.** Код AppHost на Aspire 13.6; остання відома версія aspirate — 9.x, її сумісність з Aspire 13 не перевірялась (в Aspire 13 `ManifestPublisher` позначено застарілим). Якщо `aspirate generate` завершується помилкою генерації маніфесту:
+1. Створити маніфест вручну й передати aspirate: `dotnet run --project Platform.AppHost -- --publisher manifest --output-path aspire-manifest.json`, далі `aspirate generate --aspire-manifest aspire-manifest.json`.
+2. Якщо `--publisher` не підтримується — використати крок конвеєра Aspire 13: `dotnet run --project Platform.AppHost -- --operation publish --step publish-manifest --output-path aspire-manifest.json`.
+3. Крайній варіант — тимчасово знизити пакети `Aspire.Hosting.*` та SDK AppHost до 9.5.x (сервіси лишаються на net10).
+
+## Частина 2–3. Ручне розгортання
+```powershell
+# aspirate destroy виконано; змінні для секретів:
+$env:SQL_PASSWORD = 'Str0ng#Passw0rd'; $env:RABBIT_PASSWORD = '<пароль>'; $env:JWT_SECRET = '<≥ 32 символи>'
+
+./k8s/deploy-manual.ps1            # docker build ×2, secrets, infra, ConfigMap, Deployment, Service
+# або по кроках:
+docker build -t catalog-api:v1 -f Services/Catalog/Library.Catalog.Api/Dockerfile .
+docker build -t gateway:v1 -f Platform.ApiGateway/Dockerfile .
+./k8s/create-secrets.ps1
+kubectl apply -f k8s/infra/
+kubectl apply -f k8s/gateway-configmap.yaml -f k8s/catalog-configmap.yaml
+kubectl apply -f k8s/catalog-api-deployment.yaml -f k8s/catalog-api-service.yaml
+kubectl apply -f k8s/gateway-deployment.yaml -f k8s/gateway-service.yaml
+
+kubectl get pods,services
+kubectl describe pod -l app=catalog-api          # події, стан liveness/readiness
+kubectl port-forward service/gateway 8080:80
+$t = ./scripts/make-jwt.ps1
+curl.exe -H "Authorization: Bearer $t" http://localhost:8080/api/books
+kubectl logs deploy/gateway | Select-String catalog
+```
+Без токена `/api/books` → **401** (Лаб. 09); з токеном ролі Admin → **200** зі списком книг (початкове наповнення Каталогу, `ASPNETCORE_ENVIRONMENT=Staging`).
+
+## Демонстрація (контрольні точки)
+| Сценарій | Команди | Очікування |
+|---|---|---|
+| Відновлення пода | `kubectl delete pod <под catalog-api>` → `kubectl get pods -w` | Deployment одразу створює новий под; кількість реплік — 2 |
+| Readiness при недоступній БД | `kubectl scale deploy/sql-server --replicas=0` → `kubectl get pods` | поди catalog-api `0/1 Running` (NotReady), без рестартів (RESTARTS не росте); `/api/books` через Service → помилка, бо немає готових подів; після `--replicas=1` — знову `1/1` |
+| Зміна ConfigMap | змінити значення → `kubectl apply` → `kubectl rollout restart deploy/gateway` | контейнер бачить нові змінні лише після перезапуску |
+| Secret = Base64 | `kubectl get secret gateway-secrets -o yaml` → `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('<значення>'))` | значення декодується (не шифрування) |
+| Service discovery | `kubectl exec deploy/gateway -- printenv \| findstr services__` | ключі `services__catalog-api__http__0` та ін. |
+
+## Порівняння: aspirate і ручні маніфести
+| | Aspirate | Ручні маніфести |
+|---|---|---|
+| Джерело | модель AppHost (єдине джерело правди) | окремі YAML |
+| Охоплення | вся платформа: сервіси, інфраструктура, параметри | вибрані компоненти |
+| Образи | `dotnet publish /t:PublishContainer` без Dockerfile | власні багатоетапні Dockerfile |
+| Конфігурація | ConfigMap/Secret із маніфесту; секрети шифруються паролем aspirate | ConfigMap у YAML; Secret створюється `kubectl` |
+| Проби, репліки, ресурси | за замовчуванням або через шаблони | явно задані (`replicas: 2`, liveness/readiness, `resources`) |
+| Недоліки | залежність від версії Aspire/aspirate, мало контролю, не створює БД | багато ручної роботи, ризик розбіжності з AppHost |
+
+## Питання до захисту
+- **Яку задачу розв'язує Aspir8?** Перетворює модель AppHost на Kubernetes-маніфести (Deployment, Service, ConfigMap, Secret) і збирає образи; ручний YAML не пишеться, але контролю менше.
+- **Deployment і Service?** Deployment підтримує задану кількість реплік (створює/замінює поди); Service дає стабільну адресу й DNS-ім'я та балансує трафік на поди.
+- **Як Service знаходить поди?** За лейблами: `selector` Service збігається з `labels` шаблону пода. Типи: ClusterIP (всередині кластера), NodePort, LoadBalancer, ExternalName.
+- **Liveness і readiness?** Liveness — «процес живий»: збій → перезапуск контейнера. Readiness — «готовий приймати трафік»: збій → под виключається з Service без перезапуску. Тому `/health/live` не перевіряє залежності, а `/health/ready` — перевіряє БД.
+- **ConfigMap і Secret?** ConfigMap — відкриті налаштування; Secret — паролі та ключі (Base64, а не шифрування; у production — шифрування etcd, Vault/Key Vault). Паролі в ConfigMap видно будь-кому з доступом до об'єкта й вони потрапляють у репозиторій.
+- **Service discovery?** Вбудований DNS: ім'я Service (`catalog-api`) → ClusterIP у тому самому namespace.
+- **Чому код Gateway не змінюється?** Адреси читаються з конфігурації `services:<ім'я>:http:0`; Aspire і ConfigMap Kubernetes постачають її в однаковому форматі (змінні `services__…`).
+- **`imagePullPolicy: IfNotPresent`?** Використати образ, що вже є на вузлі; локально зібраний образ Docker Desktop доступний кластеру без реєстру (з `Always` под не запустився б — образу немає у реєстрі).
+- **Шлях запиту:** клієнт → `kubectl port-forward` (localhost:8080) → Service `gateway` → под gateway (YARP, перевірка JWT) → DNS `catalog-api` → Service `catalog-api` → один із подів catalog-api → SQL Server (Service `sql-server`).
+- **Навіщо два порти (8080/8081)?** HTTP/2 без TLS не співіснує з HTTP/1.1 на одному порту: REST і проби — на 8080, gRPC — на 8081.
+
+## Обмеження
+- Код і маніфести не запускались у середовищі розробки (немає .NET SDK, Docker, кластера): aspirate-output створюється командою `aspirate generate` на комп'ютері користувача.
+- Aspirate 9.x і Aspire 13 — сумісність не перевірена (див. запасні варіанти вище).
+- Keycloak у кластері не розгортається; перевірка Keycloak-токенів у кластері вимкнена. Дані SQL Server у ручному варіанті — `emptyDir` (зникають разом з подом).
+- Токен для `/api/**` у кластері видається `scripts/make-jwt.ps1` (Auth Service перевіряється окремо в Лаб. 09).
+
+---
+
 # Lab09 — Аутентифікація та авторизація: Identity + JWT, IdentityServer, Keycloak + Pulumi
 
 Платформа Lab08 захищена трьома незалежними способами; усі сервіси приймають токени кожного з них (policy scheme `Smart` у `Platform.Security` обирає схему за claim `iss`).

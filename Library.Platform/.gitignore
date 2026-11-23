@@ -4,5 +4,16 @@ obj/
 .idea/
 *.user
 *.suo
-appsettings.Development.json
 secrets.json
+
+# Pulumi / локальні результати
+matrix-result.csv
+Pulumi.*.yaml.bak
+
+# Лаб. 10: aspirate — стан і зашифровані секрети не комітяться; aspirate-output комітиться, але без секретів
+aspirate-state.json
+aspirate-secrets.json
+**/aspirate-secrets.json
+aspirate-output/**/*.secrets
+aspirate-output/**/.*.secrets
+aspirate-output/**/secrets*.env

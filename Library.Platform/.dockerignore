@@ -1,0 +1,15 @@
+**/bin/
+**/obj/
+**/.vs/
+**/.idea/
+**/*.user
+.git/
+.gitignore
+**/node_modules/
+aspirate-output/
+aspirate-state.json
+aspirate-secrets.json
+Pulumi/
+postman/
+**/Dockerfile*
+**/*.md
