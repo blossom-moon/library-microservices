@@ -98,9 +98,7 @@ public static class Extensions
             .WithMetrics(m => m
                 .AddAspNetCoreInstrumentation()
                 .AddHttpClientInstrumentation()
-                .AddRuntimeInstrumentation()
-                // Лаб. 06: власні метрики кешу (cache.hits / cache.misses тощо) — Meter "Library.Catalog.Cache", "Platform.Aggregator.Cache"
-                .AddMeter("Library.*", "Platform.*"))
+                .AddRuntimeInstrumentation())
             .WithTracing(t => t
                 // sampling: 100 % у Development, 10 % у Production
                 .SetSampler(isDevelopment

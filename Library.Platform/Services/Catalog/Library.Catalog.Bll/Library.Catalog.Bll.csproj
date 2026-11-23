@@ -8,9 +8,6 @@
   <ItemGroup>
     <PackageReference Include="AutoMapper" Version="16.2.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.*" />
-    <!-- Лаб. 06: L1 (IMemoryCache) та абстракція L2 (IDistributedCache) -->
-    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.*" />
-    <PackageReference Include="Microsoft.Extensions.Caching.Abstractions" Version="10.*" />
     <PackageReference Include="FluentValidation" Version="12.0.0" />
   </ItemGroup>
 

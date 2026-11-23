@@ -6,31 +6,18 @@ namespace Platform.Aggregator.Controllers;
 
 [ApiController]
 [Route("api/aggregator")]
-public class LoanAggregateController(
-    LoanAggregationService grpcService, HttpLoanAggregationService httpService) : ControllerBase
+public class LoanAggregateController(LoanAggregationService service) : ControllerBase
 {
-    /// <summary>Повна картка видачі: видача + книги + відгуки. Внутрішні виклики — gRPC, відповідь кешується в Redis (30 с).</summary>
+    /// <summary>Повна картка видачі: видача (loans-api) + книги (catalog-api) + відгуки (reviews-api).</summary>
     [HttpGet("loans/{id:long}/full")]
     [ProducesResponseType(typeof(FullLoanDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
-    public Task<ActionResult<FullLoanDto>> GetFullLoan(long id, CancellationToken ct)
-        => RunAsync(id, grpcService.GetFullLoanAsync, ct);
-
-    /// <summary>Та сама агрегація через HTTP REST (Лаб. 05, без кешу) — лише для порівняння тривалості з gRPC у Traces.</summary>
-    [HttpGet("loans/{id:long}/full-http")]
-    [ProducesResponseType(typeof(FullLoanDto), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
-    public Task<ActionResult<FullLoanDto>> GetFullLoanOverHttp(long id, CancellationToken ct)
-        => RunAsync(id, httpService.GetFullLoanAsync, ct);
-
-    private async Task<ActionResult<FullLoanDto>> RunAsync(
-        long id, Func<long, CancellationToken, Task<FullLoanDto?>> aggregate, CancellationToken ct)
+    public async Task<ActionResult<FullLoanDto>> GetFullLoan(long id, CancellationToken ct)
     {
         try
         {
-            var result = await aggregate(id, ct);
+            var result = await service.GetFullLoanAsync(id, ct);
             return result is null
                 ? NotFound(new ProblemDetails { Status = 404, Title = "Loan not found", Detail = $"Loan {id} was not found." })
                 : Ok(result);

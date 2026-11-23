@@ -1,5 +1,4 @@
 using AutoMapper;
-using Library.Loans.Api.GrpcServices;
 using Library.Loans.Bll;
 using Library.Loans.Bll.Interfaces;
 using Library.Loans.Bll.Services;
@@ -7,7 +6,6 @@ using Library.Loans.Dal;
 using Library.Loans.Dal.Interfaces;
 using Library.Loans.Domain;
 using Platform.ServiceDefaults.Correlation;
-using Platform.ServiceDefaults.GrpcSupport;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -26,9 +24,6 @@ builder.Services.AddScoped<ILoanService, LoanService>();
 
 // AutoMapper
 builder.Services.AddAutoMapper(cfg => cfg.AddProfile<MappingProfile>());
-
-// Лаб. 06: gRPC (серверний interceptor логує метод, peer, статус і тривалість)
-builder.Services.AddGrpc(o => o.Interceptors.Add<GrpcLoggingInterceptor>());
 
 // Controllers + Swagger
 builder.Services.AddControllers();
@@ -53,7 +48,6 @@ if (!app.Environment.IsDevelopment())
     app.UseHttpsRedirection();   // у Development TLS не потрібен: сервіс слухає HTTP за Aspire/Gateway
 app.UseAuthorization();
 app.MapControllers();
-app.MapGrpcService<LoansGrpcService>();   // контракт Protos/loans.proto
 app.MapDefaultEndpoints();   // /health і /alive
 
 app.Run();

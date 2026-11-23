@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using AutoMapper;
-using Library.Catalog.Bll.Caching;
 using Library.Catalog.Bll.Dto;
 using Library.Catalog.Bll.Interfaces;
 using Library.Catalog.Dal.Interfaces;
@@ -26,14 +25,12 @@ public class BookService : IBookService
     private readonly IUnitOfWork _uow;
     private readonly IMapper _mapper;
     private readonly ILogger<BookService> _logger;
-    private readonly ITwoLevelCache _cache;
 
-    public BookService(IUnitOfWork uow, IMapper mapper, ILogger<BookService> logger, ITwoLevelCache cache)
+    public BookService(IUnitOfWork uow, IMapper mapper, ILogger<BookService> logger)
     {
         _uow = uow;
         _mapper = mapper;
         _logger = logger;
-        _cache = cache;
     }
 
     public async Task<PagedResult<BookDto>> GetListAsync(BookQuery query, CancellationToken ct = default)
@@ -51,18 +48,12 @@ public class BookService : IBookService
         return new PagedResult<BookDto>(_mapper.Map<List<BookDto>>(items), total, page, pageSize);
     }
 
-    /// <summary>
-    /// Картка книги — read-heavy операція: cache-aside L1 (пам'ять) → L2 (Redis) → БД.
-    /// Той самий метод викликають REST-контролер і gRPC-сервіс, тому кеш працює для обох протоколів.
-    /// Відсутня книга (EntityNotFoundException) не кешується.
-    /// </summary>
-    public Task<BookCardDto> GetByIdAsync(long id, CancellationToken ct = default) =>
-        _cache.GetOrCreateAsync(CacheKeys.Product(id), CachePolicies.Product, async token =>
-        {
-            var book = await _uow.Books.GetWithDetailsAsync(id, token)
-                       ?? throw new EntityNotFoundException(nameof(Book), id);
-            return _mapper.Map<BookCardDto>(book);
-        }, ct);
+    public async Task<BookCardDto> GetByIdAsync(long id, CancellationToken ct = default)
+    {
+        var book = await _uow.Books.GetWithDetailsAsync(id, ct)
+                   ?? throw new EntityNotFoundException(nameof(Book), id);
+        return _mapper.Map<BookCardDto>(book);
+    }
 
     public async Task<BookCardDto> CreateAsync(CreateBookDto input, CancellationToken ct = default)
     {
@@ -87,9 +78,6 @@ public class BookService : IBookService
         await _uow.Books.AddAsync(book, ct);
         await _uow.SaveChangesAsync(ct);
 
-        // Нова книга з'являється у списку своєї категорії → список застарів
-        await _cache.RemoveAsync(CacheKeys.CategoryBooks(book.CategoryId), "BookCreated", ct);
-
         return await GetByIdAsync(book.BookId, ct);
     }
 
@@ -105,7 +93,6 @@ public class BookService : IBookService
         _uow.Books.Update(book);
         await _uow.SaveChangesAsync(ct);
 
-        await InvalidateBookAsync(book, "BookPriceChanged", ct);   // синхронно з записом — клієнт не отримає застарілу ціну
         _logger.LogInformation("Book {BookId} price changed to {NewPrice}", id, newPrice);
     }
 
@@ -122,7 +109,6 @@ public class BookService : IBookService
         _uow.Books.Update(book);
         await _uow.SaveChangesAsync(ct);
 
-        await InvalidateBookAsync(book, "BookWrittenOff", ct);     // змінився AvailableCopies
         _logger.LogInformation("Book {BookId} written off: {Quantity} copies", id, quantity);
     }
 
@@ -133,26 +119,15 @@ public class BookService : IBookService
 
         _uow.Books.Delete(book);
         await _uow.SaveChangesAsync(ct);
-
-        await InvalidateBookAsync(book, "BookDeleted", ct);
-    }
-
-    /// <summary>Інвалідація пов'язаних ключів: картка книги та список її категорії (обидва рівні кешу).</summary>
-    private async Task InvalidateBookAsync(Book book, string reason, CancellationToken ct)
-    {
-        await _cache.RemoveAsync(CacheKeys.Product(book.BookId), reason, ct);
-        await _cache.RemoveAsync(CacheKeys.CategoryBooks(book.CategoryId), reason, ct);
     }
 
     // Друга специфікація (BooksByCategorySpec) проходить через той самий ListAsync
-    // Довідниковий список «книги категорії»: рідко змінюється → абсолютний TTL, вищий пріоритет у L1
-    public async Task<IReadOnlyList<BookDto>> GetByCategoryAsync(long categoryId, CancellationToken ct = default) =>
-        await _cache.GetOrCreateAsync(CacheKeys.CategoryBooks(categoryId), CachePolicies.CategoryBooks, async token =>
-        {
-            _ = await _uow.Categories.GetByIdAsync(categoryId, token)
-                ?? throw new EntityNotFoundException(nameof(Category), categoryId);
+    public async Task<IReadOnlyList<BookDto>> GetByCategoryAsync(long categoryId, CancellationToken ct = default)
+    {
+        _ = await _uow.Categories.GetByIdAsync(categoryId, ct)
+            ?? throw new EntityNotFoundException(nameof(Category), categoryId);
 
-            var books = await _uow.Books.ListAsync(new BooksByCategorySpec(categoryId), token);
-            return _mapper.Map<List<BookDto>>(books);
-        }, ct);
+        var books = await _uow.Books.ListAsync(new BooksByCategorySpec(categoryId), ct);
+        return _mapper.Map<List<BookDto>>(books);
+    }
 }

@@ -1,11 +1,9 @@
 using Library.Reviews.Application;
 using Library.Reviews.Application.Reviews;
 using Library.Reviews.Infrastructure;
-using Library.Reviews.WebApi.GrpcServices;
 using Library.Reviews.WebApi.Middleware;
 using MongoDB.Driver;
 using Platform.ServiceDefaults.Correlation;
-using Platform.ServiceDefaults.GrpcSupport;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -36,9 +34,6 @@ builder.Services.AddControllers()
 builder.Services.Configure<Microsoft.AspNetCore.Mvc.MvcOptions>(o =>
     o.SuppressImplicitRequiredAttributeForNonNullableReferenceTypes = true);
 
-// Лаб. 06: gRPC (серверний interceptor логує метод, peer, статус і тривалість)
-builder.Services.AddGrpc(o => o.Interceptors.Add<GrpcLoggingInterceptor>());
-
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
@@ -54,7 +49,6 @@ app.UseSwagger();
 app.UseSwaggerUI();
 
 app.MapControllers();
-app.MapGrpcService<ReviewsGrpcService>();   // контракт Protos/reviews.proto
 app.MapDefaultEndpoints();   // /health (зокрема перевірка MongoDB з AddInfrastructure) і /alive
 
 app.Run();

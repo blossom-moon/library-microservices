@@ -18,12 +18,6 @@ var mongo = builder.AddMongoDB("mongo")
     .WithLifetime(ContainerLifetime.Persistent);
 var reviewsDb = mongo.AddDatabase("ReviewsDb");
 
-// Лаб. 06: Redis — L2-кеш Каталогу та кеш агрегованих відповідей; том зберігає дані між перезапусками.
-// Ім'я ресурсу "redis" = ім'я в AddRedisDistributedCache("redis"); рядок підключення — ConnectionStrings:redis.
-var redis = builder.AddRedis("redis")
-    .WithDataVolume("library-redis-data")
-    .WithLifetime(ContainerLifetime.Persistent);
-
 // ---------- Сервіси: БД → сервіси → Aggregator → Gateway ----------
 var loansApi = builder.AddProject<Projects.Library_Loans_Api>("loans-api")
     .WithReference(loansDb).WaitFor(loansDb)
@@ -31,7 +25,6 @@ var loansApi = builder.AddProject<Projects.Library_Loans_Api>("loans-api")
 
 var catalogApi = builder.AddProject<Projects.Library_Catalog_Api>("catalog-api")
     .WithReference(catalogDb).WaitFor(catalogDb)
-    .WithReference(redis).WaitFor(redis)
     .WithHttpHealthCheck("/health");
 
 var reviewsApi = builder.AddProject<Projects.Library_Reviews_WebApi>("reviews-api")
@@ -42,7 +35,6 @@ var aggregator = builder.AddProject<Projects.Platform_Aggregator>("aggregator")
     .WithReference(loansApi).WaitFor(loansApi)
     .WithReference(catalogApi).WaitFor(catalogApi)
     .WithReference(reviewsApi).WaitFor(reviewsApi)
-    .WithReference(redis).WaitFor(redis)
     .WithHttpHealthCheck("/health");
 
 // Єдина публічна точка входу з фіксованим портом 5000
