@@ -8,4 +8,5 @@ public class MongoDbOptions
     public string DatabaseName { get; set; } = "Library_Reviews_Lab04";
     public string ReviewsCollection { get; set; } = "reviews";
     public string DiscussionsCollection { get; set; } = "discussions";
+    public string ProcessedEventsCollection { get; set; } = "processedEvents";   // Лаб. 08: ідемпотентність споживача
 }

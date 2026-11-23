@@ -14,6 +14,7 @@ using Library.Catalog.Dal.Repositories;
 using Library.Catalog.Dal.Seed;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Platform.Messaging;
 using Platform.ServiceDefaults.Correlation;
 using Platform.ServiceDefaults.GrpcSupport;
 
@@ -54,6 +55,9 @@ builder.Services.AddHealthChecks()
     .AddRedis(builder.Configuration.GetConnectionString("redis")!, name: "redis-cache",
         failureStatus: HealthStatus.Degraded, tags: ["cache", "redis", "ready"], timeout: TimeSpan.FromSeconds(3));
 builder.Services.AddGrpcReadinessHealth();
+
+// ---- Лаб. 08: RabbitMQ — IConnection (Aspire), publisher, оголошення топології при старті ----
+builder.AddMessaging();
 
 // ---- Лаб. 06: gRPC (серверний interceptor логує метод, peer, статус і тривалість) ----
 builder.Services.AddGrpc(o => o.Interceptors.Add<GrpcLoggingInterceptor>());

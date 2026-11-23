@@ -65,6 +65,23 @@ public class BooksController : ApiControllerBase
         return NoContent();
     }
 
+    /// <summary>Перейменування книги: після збереження публікується BookRenamedEvent (Лаб. 08).</summary>
+    [HttpPut("{id:long}/title")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Rename(
+        long id,
+        [FromBody] RenameBookDto input,
+        [FromServices] IValidator<RenameBookDto> validator,
+        CancellationToken ct)
+    {
+        if (await ValidateAsync(validator, input, ct) is { } invalid) return invalid;
+
+        await _service.RenameAsync(id, input.Title, ct);
+        return NoContent();
+    }
+
     [HttpPost("{id:long}/write-off")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]

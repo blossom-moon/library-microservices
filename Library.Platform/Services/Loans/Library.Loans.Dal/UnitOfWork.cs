@@ -13,6 +13,7 @@ public class UnitOfWork : IUnitOfWork
     public IReaderRepository Readers { get; }
     public IBookRepository Books { get; }
     public ILoanRepository Loans { get; }
+    public IProcessedEventRepository ProcessedEvents { get; }
 
     public UnitOfWork(string connectionString)
     {
@@ -26,6 +27,7 @@ public class UnitOfWork : IUnitOfWork
         Readers = new ReaderRepository(_connection, () => _transaction);
         Books = new BookRepository(_connection, () => _transaction);
         Loans = new LoanRepository(_connection, () => _transaction);
+        ProcessedEvents = new ProcessedEventRepository(_connection, () => _transaction);
     }
 
     public async Task BeginTransactionAsync(IsolationLevel isolationLevel, CancellationToken ct)

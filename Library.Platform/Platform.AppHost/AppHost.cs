@@ -24,6 +24,15 @@ var redis = builder.AddRedis("redis")
     .WithDataVolume("library-redis-data")
     .WithLifetime(ContainerLifetime.Persistent);
 
+// Лаб. 08: RabbitMQ — брокер повідомлень для подієвої інтеграції сервісів.
+// Пароль — секретний параметр (user-secrets), бо з постійним томом згенерований щоразу новий пароль не збігся б зі збереженим.
+// Management UI — http://localhost:15672 (користувач guest, пароль — значення параметра rabbit-password).
+var rabbitPassword = builder.AddParameter("rabbit-password", secret: true);
+var rabbit = builder.AddRabbitMQ("messaging", password: rabbitPassword)
+    .WithDataVolume("library-rabbitmq-data")      // черги й повідомлення переживають перезапуск
+    .WithManagementPlugin(port: 15672)            // веб-інтерфейс керування
+    .WithLifetime(ContainerLifetime.Persistent);
+
 // ---------- Сервіси: БД → сервіси → Aggregator → Gateway ----------
 // Лаб. 07: WithHttpHealthCheck("/health/ready") — Aspire опитує readiness-endpoint; статус ресурсу у Dashboard
 // стає Healthy лише після успішних перевірок залежностей, і лише тоді WaitFor пропускає залежні ресурси.
@@ -33,15 +42,18 @@ var chaosDelayMs = Environment.GetEnvironmentVariable("CHAOS_REVIEWS_DELAY_MS") 
 
 var loansApi = builder.AddProject<Projects.Library_Loans_Api>("loans-api")
     .WithReference(loansDb).WaitFor(loansDb)
+    .WithReference(rabbit).WaitFor(rabbit)         // споживач подій Каталогу (loans.catalog-sync)
     .WithHttpHealthCheck("/health/ready");
 
 var catalogApi = builder.AddProject<Projects.Library_Catalog_Api>("catalog-api")
     .WithReference(catalogDb).WaitFor(catalogDb)
+    .WithReference(rabbit).WaitFor(rabbit)         // публікує події (exchange catalog-events)
     .WithReference(redis).WaitFor(redis)
     .WithHttpHealthCheck("/health/ready");
 
 var reviewsApi = builder.AddProject<Projects.Library_Reviews_WebApi>("reviews-api")
     .WithReference(reviewsDb).WaitFor(reviewsDb)
+    .WithReference(rabbit).WaitFor(rabbit)         // споживач подій Каталогу (reviews.catalog-sync)
     .WithEnvironment("Chaos__DelayMs", chaosDelayMs)
     .WithHttpHealthCheck("/health/ready");
 

@@ -1,4 +1,98 @@
-# Lab07 — Резильєнтність (Polly), бізнес-метрики та Health Checks
+# Lab08 — Подієва мікросервісна архітектура з RabbitMQ
+
+Розширення платформи з Lab07: **Каталог** публікує події про зміну книги, а **Видачі** (Lab02) і **Відгуки** (Lab04) оновлюють свої локальні копії даних згідно з політикою дублювання з Лаб. 01.
+
+| Подія (Каталог → брокер) | Хто споживає | Що оновлюється |
+|---|---|---|
+| `BookPriceChangedEvent` (`book.price_changed`) | `loans-api` | `Books.Price` у БД видач; ціни/назви в позиціях `LoanItems` — знімки, **не змінюються** |
+| `BookRenamedEvent` (`book.renamed`) | `loans-api`, `reviews-api` | `Books.Title` у видачах; поле `bookTitle` в усіх відгуках про книгу |
+
+```
+PUT /api/books/{id}/price|title ─► catalog-api ─ SaveChanges ─► publish ─► exchange catalog-events (topic)
+                                                                              ├─ "book.*"       ─► loans.catalog-sync   ─► loans-api   (Books у SQL + ProcessedEvents)
+                                                                              └─ "book.renamed" ─► reviews.catalog-sync ─► reviews-api (bookTitle у MongoDB + processedEvents)
+                                       відхилені/необроблені ─► catalog-events.dlx (direct) ─► <черга>.dlq
+```
+
+## Що де
+| Вимога | Де в коді |
+|---|---|
+| RabbitMQ в AppHost (volume, Management UI) | `Platform.AppHost/AppHost.cs` — `AddRabbitMQ("messaging", password: …).WithDataVolume().WithManagementPlugin(port: 15672)`, `WithReference(rabbit).WaitFor(rabbit)` для catalog/loans/reviews |
+| Aspire.RabbitMQ.Client (7.x), `IConnection`, health check | `Platform.Messaging/MessagingExtensions.cs` — `builder.AddRabbitMQClient("messaging")` (singleton `IConnection`, health check Aspire) + власна перевірка `rabbitmq-connection` (тег `ready`); асинхронний API `IChannel` |
+| Декларативна топологія (topic exchange, черги, bindings, DLX/DLQ) | `Platform.Messaging/Topology/MessagingTopology.cs`; оголошується під час старту (`TopologyInitializer` і `RabbitMqEventConsumer`) |
+| Незмінні integration events (EventId, CorrelationId) | `Platform.Messaging/Events/IntegrationEvent.cs`, `CatalogEvents.cs` — `record` з `init` |
+| `IEventPublisher` + persistent-публікація в JSON | `Platform.Messaging/Publishing/` — `Persistent`, `ContentType`, `MessageId = EventId`, `Type`, `x-correlation-id`, `x-schema-version`; camelCase (`JsonDefaults`) |
+| Публікація лише після збереження змін | `Library.Catalog.Bll/Services/BookService.cs` — `ChangePriceCoreAsync`, `RenameCoreAsync`: `SaveChangesAsync` → `PublishAsync` |
+| Consumer як `BackgroundService`, ручне підтвердження | `Platform.Messaging/Consuming/RabbitMqEventConsumer.cs` — `BasicQos`, `AsyncEventingBasicConsumer`, `autoAck: false`, зупинка через `stoppingToken` |
+| Ack / Nack без requeue | той самий файл: успіх → `BasicAckAsync`; JSON/несумісна версія → `BasicNackAsync(requeue: false)` → DLQ |
+| Ідемпотентні обробники, `ProcessedEvents` | Видачі: `Library.Loans.Bll/Events/*Handler.cs`, `Library.Loans.Dal/Repositories/ProcessedEventRepository.cs`, таблиця в `Platform.AppHost/db/loans-init.sql`; Відгуки: `Library.Reviews.Infrastructure/Messaging/BookRenamedHandler.cs`, колекція `processedEvents` |
+| Репліка даних за політикою Лаб. 01 | Видачі: `BookRepository.UpdatePriceAsync/UpdateTitleAsync`; Відгуки: `UpdateMany` по `bookId`; час останньої застосованої зміни (`PriceChangedAt`, `TitleChangedAt`, `bookTitleSyncedAt`) — захист від out-of-order |
+| Повтори з `x-retry-count`, максимум спроб | `RabbitMqEventConsumer.RetryOrDeadLetterAsync` — повторна публікація зі збільшеним лічильником, оригінал підтверджується; після 3 спроб — DLQ |
+| Передача контексту трасування | `Platform.Messaging/Telemetry/TraceContextPropagation.cs` — W3C `traceparent` (Inject/Extract), Activity `Producer` і `Consumer` з тегами `messaging.*`; `AddSource("Platform.Messaging")` у ServiceDefaults |
+| Структуроване логування збоїв | Serilog `LogContext`: `EventId`, `EventType`, `CorrelationId`, `Queue`; ідентифікатори сутностей — у повідомленнях обробників; метрика `messaging.dlq.depth` (gauge) |
+
+## Запуск
+Як у Lab07, плюс **пароль RabbitMQ** (секрет, у репозиторій не потрапляє):
+```powershell
+cd Platform.AppHost
+dotnet user-secrets set "Parameters:rabbit-password" "<пароль>"
+cd ..
+dotnet run --project Platform.AppHost -p:UseAppHost=false
+```
+У Dashboard має з'явитися ресурс **messaging** (Running). Management UI: **http://localhost:15672**, користувач `guest`, пароль — значення `rabbit-password`. Вкладка *Exchanges*: `catalog-events`, `catalog-events.dlx`; *Queues*: `loans.catalog-sync`, `reviews.catalog-sync` та відповідні `*.dlq`; у *Bindings* exchange `catalog-events` — `book.*` і `book.renamed`.
+
+> Якщо Management UI показує порожній список черг після першого запуску — зачекайте кілька секунд: топологію оголошують сервіси при старті.
+
+## Перевірка (контрольні точки)
+Запити — через Gateway (`http://localhost:5000`); у PowerShell:
+```powershell
+# 1. Зміна ціни: за кілька секунд нова ціна з'являється в Books бази LibraryLoans, ціни в LoanItems не змінюються
+Invoke-RestMethod -Method Put -Uri http://localhost:5000/api/books/1/price -ContentType application/json -Body '{"price":199.99}'
+
+# 2. Перейменування: оновлюється Books.Title у видачах і bookTitle в усіх відгуках про книгу 1
+Invoke-RestMethod -Method Put -Uri http://localhost:5000/api/books/1/title -ContentType application/json -Body '{"title":"Кобзар (нове видання)"}'
+```
+Перевірка даних:
+* Видачі (SQL): `SELECT BookId, Title, Price, PriceChangedAt, TitleChangedAt FROM dbo.Books;` та `SELECT * FROM dbo.ProcessedEvents;`
+* Відгуки (MongoDB, `GET /api/reviews?...` або Dashboard → mongo): `bookTitle` оновлено в усіх документах із `bookId = 1`.
+* Management UI → *Queues*: після публікації повідомлення з'являється й швидко зникає з черг (Ack); `MessageId` = `EventId`, заголовок `x-correlation-id`.
+
+### Сценарії стійкості
+1. **Дублікат події.** Management UI → Exchanges → `catalog-events` → *Publish message*: Routing key `book.renamed`; Properties: `message_id` = `11111111-1111-1111-1111-111111111111`, `type` = `BookRenamedEvent`, `delivery_mode` = `2`; Payload:
+   ```json
+   {"bookId":1,"oldTitle":"A","newTitle":"Дублікат-тест","eventId":"11111111-1111-1111-1111-111111111111","occurredAt":"2026-11-24T12:00:00Z","correlationId":"manual-1","schemaVersion":1}
+   ```
+   Надішліть **двічі**: перша обробка змінює дані, друга — у логах `Duplicate event … skipped`, `ProcessedEvents` містить один запис. Значення `occurredAt` підставте **поточним UTC-часом**: подія зі старішою датою за вже застосовану пропускається як застаріла (`Skipped`), а дата з майбутнього заблокувала б наступні реальні зміни.
+2. **Некоректний JSON → DLQ.** Те саме, але Payload `not a json`, `type` = `BookRenamedEvent`: повідомлення без повторів потрапляє в `loans.catalog-sync.dlq` та `reviews.catalog-sync.dlq` (заголовок `x-death` з причиною `rejected`); у логах `Permanent failure … sending to DLQ`; метрика `messaging.dlq.depth` > 0.
+3. **Обробка після перезапуску `loans-api`.** Зупиніть `loans-api` у Dashboard, змініть кілька цін (запити вище) — повідомлення накопичуються в `loans.catalog-sync` (Management UI → *Ready*). Запустіть `loans-api` — усі події обробляються, лічильник у черзі повертається до 0.
+4. **Тимчасовий збій → повтори.** Зупиніть контейнер `sql`, змініть ціну: у логах `loans-api` — `failed, retry 1/3`, `2/3`, `3/3` (заголовок `x-retry-count`), далі `sending to DLQ`; якщо SQL повернути до вичерпання спроб — подія оброблюється.
+5. **Наскрізний trace.** Dashboard → Traces → запит `PUT /api/books/1/price`: spans `PUT books/{id}/price` → `catalog-events publish` (Producer) → `loans.catalog-sync process` (Consumer) → SQL-команди; у Structured logs фільтр за `CorrelationId`.
+
+## Ключові рішення
+* **Спільна бібліотека `Platform.Messaging`**: події, publisher, consumer, топологія і tracing — в одному місці; сервіси підключають її одним викликом `AddMessaging()` + `AddEventConsumer(queue, …)`.
+* **Вся топологія оголошується кожним учасником** (ідемпотентно). Інакше подія, опублікована до першого запуску споживача, була б втрачена: exchange без bindings відкидає повідомлення.
+* **DLX типу `direct`** з `x-dead-letter-routing-key` = ім'я черги (замість `fanout` із прикладу): кожна DLQ отримує лише повідомлення своєї черги.
+* **Повтор — у ту саму чергу** (default exchange, routing key = ім'я черги), а не в `catalog-events`: інакше копію повтору отримали б усі споживачі.
+* **Тимчасовий vs постійний збій.** Тимчасові (БД недоступна, таймаут) — повтори до 3 разів із паузою 1 с × номер спроби; постійні (`JsonException`, невідома версія схеми, відсутні обов'язкові поля) — одразу в DLQ. Подія, на яку сервіс не підписаний, підтверджується й ігнорується (логується попередження).
+* **Out-of-order.** Кожна зміна копії застосовується лише якщо `OccurredAt` події новіший за останній застосований (окремо для ціни й назви).
+* **Ідемпотентність**: SQL — `EventId` у `ProcessedEvents` (PRIMARY KEY) в одній транзакції зі зміною; MongoDB (автономний сервер без транзакцій) — перевірка `processedEvents` → ідемпотентна зміна → запис `_id = EventId`; збій між кроками дає лише безпечне повторне застосування.
+* **Збій брокера після збереження в БД.** Збережена зміна не скасовується, а втрата події фіксується в логах (`Error … was NOT published`). Повну гарантію доставки дає *Transactional Outbox* (подія записується в таблицю тієї ж БД у тій самій транзакції, окремий фоновий процес публікує її) — не реалізовано (за завданням — за бажанням).
+* **Версіонування схеми**: `schemaVersion` у тілі й заголовку `x-schema-version`; нові поля додаються, наявні не перейменовуються; споживач відхиляє версії новіші за підтримувану.
+* **Обмеження**: події створення/видалення книги не публікуються (не потрібні для сценаріїв завдання; Видачі зберігають історію й `FK` без каскаду).
+
+## Питання до захисту
+* **gRPC чи події?** gRPC — синхронна відповідь потрібна тут і зараз (агрегація). Події — повідомити інших про факт без очікування відповіді, послабити зв'язність, пережити тимчасову недоступність споживача.
+* **Eventual consistency**: копія в іншому сервісі оновлюється не миттєво, а за секунди; джерело істини — Каталог.
+* **Чому події незмінні й самодостатні?** Це факти минулого; споживач не має ходити в Каталог по додаткові дані.
+* **Exchange / queue / binding**: publisher надсилає в exchange з routing key; binding з шаблоном (`*` — одне слово, `#` — будь-яка кількість) спрямовує повідомлення в черги; кожна черга — окремий споживач (fan-out), екземпляри одного сервісу читають одну чергу (competing consumers).
+* **Ідемпотентність** обов'язкова, бо брокер гарантує *at-least-once*: повідомлення може прийти повторно (обрив зʼєднання до Ack).
+* **Чому повтор — це повторна публікація, а не requeue?** Повідомлення, повернене через requeue, приходить без змін — лічильник у заголовку збільшити не можна.
+* **Dead Letter Exchange**: куди RabbitMQ переносить відхилені (Nack requeue:false) повідомлення; зберігає оригінал і заголовок `x-death`; потребує ручного розслідування.
+* **Як працює trace через брокер?** `traceparent` у заголовках повідомлення: publisher — Inject, consumer — Extract і новий Activity `Consumer`, дочірній до span публікації.
+
+---
+
+# Lab07 (попередня робота) — Резильєнтність (Polly), бізнес-метрики та Health Checks
 
 Розширення платформи з Lab06 (Aspire, YARP Gateway, Aggregator на gRPC, Redis-кеш):
 

@@ -5,6 +5,10 @@ using Library.Reviews.WebApi.GrpcServices;
 using Library.Reviews.WebApi.Middleware;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using MongoDB.Driver;
+using Library.Reviews.Infrastructure.Messaging;
+using Platform.Messaging;
+using Platform.Messaging.Events;
+using Platform.Messaging.Topology;
 using Platform.ServiceDefaults.Correlation;
 using Platform.ServiceDefaults.GrpcSupport;
 
@@ -32,6 +36,11 @@ builder.Services.AddHealthChecks()
     .AddMongoDb(sp => sp.GetRequiredService<IMongoClient>(), name: "reviews-db",
         failureStatus: HealthStatus.Unhealthy, tags: ["database", "mongodb", "ready"], timeout: TimeSpan.FromSeconds(5));
 builder.Services.AddGrpcReadinessHealth();
+
+// Лаб. 08: RabbitMQ (IConnection через Aspire, топологія при старті) і споживач черги reviews.catalog-sync
+builder.AddMessaging();
+builder.Services.AddEventConsumer(MessagingTopology.ReviewsQueue, registry => registry
+    .Handle<BookRenamedEvent, BookRenamedHandler>());
 
 builder.Services.AddAutoMapper(cfg =>
 {
