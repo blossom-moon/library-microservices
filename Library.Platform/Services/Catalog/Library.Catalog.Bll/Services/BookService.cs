@@ -9,6 +9,9 @@ using Library.Catalog.Dal.Specifications;
 using Library.Catalog.Domain.Entities;
 using Library.Catalog.Domain.Exceptions;
 using Microsoft.Extensions.Logging;
+using Platform.Messaging.Events;
+using Platform.Messaging.Publishing;
+using Platform.Messaging.Topology;
 
 namespace Library.Catalog.Bll.Services;
 
@@ -29,10 +32,13 @@ public class BookService : IBookService
     private readonly ILogger<BookService> _logger;
     private readonly ITwoLevelCache _cache;
     private readonly CatalogMetrics _metrics;
+    private readonly IEventPublisher _publisher;
 
-    public BookService(IUnitOfWork uow, IMapper mapper, ILogger<BookService> logger, ITwoLevelCache cache, CatalogMetrics metrics)
+    public BookService(IUnitOfWork uow, IMapper mapper, ILogger<BookService> logger, ITwoLevelCache cache, CatalogMetrics metrics,
+        IEventPublisher publisher)
     {
         _metrics = metrics;
+        _publisher = publisher;
         _uow = uow;
         _mapper = mapper;
         _logger = logger;
@@ -117,12 +123,59 @@ public class BookService : IBookService
         var book = await _uow.Books.GetByIdAsync(id, ct)
                    ?? throw new EntityNotFoundException(nameof(Book), id);
 
+        var oldPrice = book.Price;
         book.ChangePrice(newPrice);          // правило «ціна > 0» — у сутності
         _uow.Books.Update(book);
-        await _uow.SaveChangesAsync(ct);
+        await _uow.SaveChangesAsync(ct);     // 1) зміни збережено в БД
 
         await InvalidateBookAsync(book, "BookPriceChanged", ct);   // синхронно з записом — клієнт не отримає застарілу ціну
         _logger.LogInformation("Book {BookId} price changed to {NewPrice}", id, newPrice);
+
+        // 2) лише тепер — подія (якщо SaveChanges кинув виняток, до цього місця виконання не доходить)
+        if (oldPrice != newPrice)
+            await PublishAsync(new BookPriceChangedEvent(book.BookId, book.Title, oldPrice, newPrice),
+                CatalogRoutingKeys.PriceChanged, ct);
+    }
+
+    public Task RenameAsync(long id, string newTitle, CancellationToken ct = default) =>
+        _metrics.MeasureAsync("rename", () => RenameCoreAsync(id, newTitle, ct));
+
+    private async Task RenameCoreAsync(long id, string newTitle, CancellationToken ct)
+    {
+        using var activity = Source.StartActivity("RenameBook");
+        activity?.SetTag("book.id", id);
+
+        var book = await _uow.Books.GetByIdAsync(id, ct)
+                   ?? throw new EntityNotFoundException(nameof(Book), id);
+
+        var oldTitle = book.Title;
+        book.Rename(newTitle);
+        _uow.Books.Update(book);
+        await _uow.SaveChangesAsync(ct);     // 1) зміни збережено в БД
+
+        await InvalidateBookAsync(book, "BookRenamed", ct);
+        _logger.LogInformation("Book {BookId} renamed from '{OldTitle}' to '{NewTitle}'", id, oldTitle, book.Title);
+
+        if (oldTitle != book.Title)          // 2) подія — після успішного збереження
+            await PublishAsync(new BookRenamedEvent(book.BookId, oldTitle, book.Title), CatalogRoutingKeys.Renamed, ct);
+    }
+
+    /// <summary>
+    /// Публікація інтеграційної події ПІСЛЯ збереження. Збій брокера не скасовує вже збережену зміну (HTTP-клієнт
+    /// отримує успіх), але фіксується як Error: це саме те вікно, яке закриває Transactional Outbox
+    /// (подія записується в таблицю тієї ж БД у тій самій транзакції; окремий процес публікує її) — див. README.
+    /// </summary>
+    private async Task PublishAsync<TEvent>(TEvent @event, string routingKey, CancellationToken ct) where TEvent : IntegrationEvent
+    {
+        try
+        {
+            await _publisher.PublishAsync(@event, MessagingTopology.CatalogExchange, routingKey, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Event {EventType} {EventId} was NOT published (change already saved); consumers' copies are stale until reconciled",
+                typeof(TEvent).Name, @event.EventId);
+        }
     }
 
     public Task WriteOffAsync(long id, int quantity, CancellationToken ct = default) =>

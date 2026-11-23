@@ -1,4 +1,206 @@
-# Lab07 — Резильєнтність (Polly), бізнес-метрики та Health Checks
+# Lab09 — Аутентифікація та авторизація: Identity + JWT, IdentityServer, Keycloak + Pulumi
+
+Платформа Lab08 захищена трьома незалежними способами; усі сервіси приймають токени кожного з них (policy scheme `Smart` у `Platform.Security` обирає схему за claim `iss`).
+
+| Частина | Що | Де |
+|---|---|---|
+| 1. Identity + JWT | `Library.Auth.Api` (:5244): реєстрація, підтвердження email, login, refresh/revoke, скидання пароля, користувачі й ролі `User`/`Admin` | `Services/Auth/Library.Auth.Api` |
+| 2. IdentityServer | Duende IdentityServer (:5400): Authorization Code + PKCE, Client Credentials, ASP.NET Identity, EF Configuration/Operational store | `Services/IdentityServer/Library.IdentityServer` |
+| 3. Keycloak + Pulumi | realm `LibraryRealm`, ресурс-сервери, ролі, політики, клієнти й користувачі як код | `Pulumi/Library.Keycloak.Pulumi` |
+| Спільне | `[RequirePermission]`, динамічні політики, мульти-емітентна автентифікація, Client Credentials handler | `Platform.Security` (+ `Platform.Security.Tests`) |
+| Заглушка | `payments-api` (:5242): `payments:read/process/refund` | `Services/Payments/Library.Payments.Api` |
+
+## Що де
+| Вимога | Реалізація |
+|---|---|
+| Окрема БД Identity, ролі `User`/`Admin`, seed адміністратора | `AddDbContext<ApplicationDbContext>` + `IdentitySeeder` (Development: `Seed:*` в `appsettings.Development.json`) |
+| Пароль ≥ 8, lockout 5 спроб, унікальний email | `Library.Auth.Api/Program.cs` — `AddIdentity(options => …)` |
+| Access JWT 15 хв (HS256, claims `sub`, `unique_name`, `email`, `jti`, `role`) | `Services/JwtTokenService.cs` |
+| Refresh-токен: 7 днів, у БД лише SHA-256 хеш, rotation, reuse detection, HttpOnly cookie | `Services/RefreshTokenService.cs`, `AuthController.SetRefreshCookie` |
+| Підтвердження email, forgot/reset/change password (одноразові токени з терміном дії) | `AuthController` + `IAuthEmailSender` (mock: лист у лог; у Development токен ще й у відповіді) |
+| Owner-or-admin, Admin-only ендпоінти | `UsersController` |
+| Дозволи `domain:action` на кожному REST-ендпоінті | `[RequirePermission(Permissions.Loans.Read)]` тощо у контролерах Loans/Catalog/Payments |
+| Scope-політики для gRPC (M2M) | `[Authorize(Policy = ApiScopes.LoansRead)]` на gRPC-сервісах |
+| Client Credentials в Aggregator | `Platform.Security/ClientCredentials` + `.AddHttpMessageHandler<ClientCredentialsTokenHandler>()` на gRPC/HTTP-клієнтах |
+| Gateway: перший рубіж, публічні/захищені маршрути, `X-User-Id` | `Platform.ApiGateway/Program.cs`, `appsettings.json` (`auth-public` — anonymous, решта — `authenticated`) |
+| IdentityServer: клієнти `postman` (Code+PKCE), `swagger` (public PKCE), `aggregator_service` (Client Credentials) | `Library.IdentityServer/Data/IdentityServerConfig.cs` |
+| Keycloak як код | `Pulumi/Library.Keycloak.Pulumi/LibraryStack.cs`, матриця — `Matrix.cs`, клієнти — `ClientExtensions.cs` |
+
+## Запуск
+```powershell
+# 1. Секрети AppHost (один раз)
+cd Platform.AppHost
+dotnet user-secrets set "Parameters:sql-password" "<пароль SQL>"
+dotnet user-secrets set "Parameters:rabbit-password" "<пароль>"
+dotnet user-secrets set "Parameters:jwt-secret" "<випадковий рядок ≥ 32 символи>"
+dotnet user-secrets set "Parameters:aggregator-client-secret" "<секрет клієнта aggregator_service>"
+dotnet user-secrets set "Parameters:keycloak-admin-password" "<пароль адміна Keycloak>"
+
+# 2. Міграції (потрібно один раз; dotnet-ef: dotnet tool install --global dotnet-ef)
+cd ..\Services\Auth\Library.Auth.Api
+dotnet ef migrations add Initial
+cd ..\..\IdentityServer\Library.IdentityServer
+dotnet ef migrations add Initial -c ApplicationDbContext      -o Data/Migrations/Identity
+dotnet ef migrations add Initial -c PersistedGrantDbContext   -o Data/Migrations/PersistedGrant
+dotnet ef migrations add Initial -c ConfigurationDbContext    -o Data/Migrations/Configuration
+
+# 3. Запуск (копія на C:, якщо WDAC блокує D:)
+dotnet run --project ..\..\..\Platform.AppHost -p:UseAppHost=false
+
+# 4. Keycloak: коли ресурс keycloak Healthy
+cd ..\..\..\Pulumi\Library.Keycloak.Pulumi
+pulumi login --local; pulumi stack init dev
+pulumi config set --secret keycloak:password "<keycloak-admin-password>"
+pulumi up
+pulumi stack output PostmanClientSecret --show-secrets
+```
+Dev-облікові дані: Auth — `admin` / `Admin#12345` (лише Development); IdentityServer — `alice`, `bob` (пароль `Pass#12345`); Keycloak — `alice` (admin), `bob` (manager), `carol` (user), `dave` (guest), пароль `Pass#12345`.
+
+## Матриця прав
+| Дозвіл | admin | manager | user | guest |
+|---|:-:|:-:|:-:|:-:|
+| `loans:read` / `loans:create` | ✓ | ✓ | ✓ | – |
+| `loans:update` (повернення) | ✓ | ✓ | – | – |
+| `loans:delete` (скасування) | ✓ | – | – | – |
+| `catalog:read` | ✓ | ✓ | ✓ | ✓ |
+| `catalog:create` / `catalog:update` | ✓ | ✓ | – | – |
+| `catalog:delete` | ✓ | – | – | – |
+| `payments:read` | ✓ | ✓ | ✓ | – |
+| `payments:process` | ✓ | ✓ | – | – |
+| `payments:refund` | ✓ | – | – | – |
+
+`loans:approve` і `catalog:publish` визначені в матриці (Keycloak), але відповідних ендпоінтів у домені немає. Для власних токенів (Identity): `Admin` — усе, `User` — `*:read` і `*:create`; для IdentityServer права визначаються `scope` (`loans.read` ≙ `loans:read`).
+Фактичні коди — `./scripts/check-matrix.ps1` (результат у `matrix-result.csv` → вставити в звіт). Без токена будь-який `/api/**` → **401**; токен без потрібного дозволу → **403**.
+
+## Postman
+`postman/Library-Lab09.postman_collection.json`: Identity (register → verify → login → refresh → logout), IdentityServer (Authorization Code+PKCE налаштовується на вкладці Authorization; Client Credentials), Keycloak (токени для alice/bob/carol/dave та виклики з різних ролей), перевірка без токена. Змінні: `keycloakPostmanSecret` (вивід Pulumi), `aggregatorSecret` (= `Parameters:aggregator-client-secret`).
+
+## Розшифровані JWT для звіту
+Вставити токен на jwt.io (або `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(...))`) і зробити скриншот:
+- Identity: `role`: `User` / `Admin`, `sub`, `unique_name`, `exp` (+15 хв).
+- IdentityServer Client Credentials: `client_id`, `scope`, `aud` = `*_api`, **немає `sub`** (немає користувача).
+- Keycloak manager (bob): `resource_access.loans-api.roles` і `catalog-api.roles` зі списком дозволів composite-ролі `manager`.
+
+## Ключові рішення
+- **Три емітенти — одна політика дозволів**: `PermissionEvaluator` читає Keycloak (`authorization.permissions` / `resource_access`), `scope` (IdentityServer) або `role` (Identity). Контролери не залежать від провайдера.
+- **Динамічні політики**: `RequirePermission("loans:read")` → політика `perm:loans:read` створюється провайдером за потреби; немає ручної реєстрації десятків політик.
+- **Gateway і сервіси перевіряють токен обидва** (defense in depth): Gateway відсікає анонімів, сервіс не довіряє мережі.
+- **Refresh-токен**: у БД лише хеш; повторне використання вже відкликаного токена = ознака крадіжки → відкликаються всі сесії користувача.
+- **Keycloak: `ValidateAudience=false`**: audience Keycloak-токенів — `account`, а не API; без цього замість 403 було б 401. Доступ визначають ролі/дозволи.
+- **MapInboundClaims=false**, `RoleClaimType = "role"`: імена claims у коді збігаються з тими, що в токені.
+
+## Питання до захисту
+- **Authentication vs Authorization?** Хто ти (токен валідний) vs що тобі дозволено (роль/дозвіл). 401 — немає/невалідний токен; 403 — токен є, прав немає.
+- **Чому access токен короткий, а refresh довгий і в HttpOnly cookie?** Викрадений access діє хвилини; HttpOnly cookie недоступна JS (XSS), `Path=/auth` і `SameSite=Strict` обмежують відправлення.
+- **Що таке rotation і reuse detection?** Кожен refresh видає новий токен, старий відкликається; повторне пред'явлення старого → відкликання всіх токенів користувача.
+- **Authorization Code + PKCE і Client Credentials — коли що?** Code+PKCE — користувач через браузер, `code_verifier` захищає від перехоплення коду. Client Credentials — сервіс–сервіс, без користувача (немає `sub`).
+- **Чому секрет клієнта зберігається хешем (`Sha256`)?** У БД IdentityServer не лежить відкритий секрет.
+- **Роль vs дозвіл (scope)?** Роль — група користувачів; дозвіл — дія над ресурсом. Composite-роль Keycloak збирає дозволи й розгортається в токені.
+- **Навіщо Pulumi?** Конфігурація Keycloak відтворювана, версіонована й перевіряється ревʼю; `pulumi up` = той самий realm на будь-якому стенді.
+
+## Обмеження
+- Код не компілювався в середовищі розробки (немає .NET SDK): версії пакетів `Duende.IdentityServer*` (7.*), `Aspire.Hosting.Keycloak` (preview) і API `Pulumi.Keycloak` перевірити під час першої збірки.
+- Міграції EF генеруються командами вище (design-time фабрики є).
+- Swagger UI не налаштований на OAuth (клієнт `swagger` у IdentityServer і Keycloak створений, але UI не підключений).
+- Листи — mock (лог). Outbox, ротація ключів HS256, HTTPS у Development не реалізовано.
+
+---
+
+# Lab08 — Подієва мікросервісна архітектура з RabbitMQ
+
+Розширення платформи з Lab07: **Каталог** публікує події про зміну книги, а **Видачі** (Lab02) і **Відгуки** (Lab04) оновлюють свої локальні копії даних згідно з політикою дублювання з Лаб. 01.
+
+| Подія (Каталог → брокер) | Хто споживає | Що оновлюється |
+|---|---|---|
+| `BookPriceChangedEvent` (`book.price_changed`) | `loans-api` | `Books.Price` у БД видач; ціни/назви в позиціях `LoanItems` — знімки, **не змінюються** |
+| `BookRenamedEvent` (`book.renamed`) | `loans-api`, `reviews-api` | `Books.Title` у видачах; поле `bookTitle` в усіх відгуках про книгу |
+
+```
+PUT /api/books/{id}/price|title ─► catalog-api ─ SaveChanges ─► publish ─► exchange catalog-events (topic)
+                                                                              ├─ "book.*"       ─► loans.catalog-sync   ─► loans-api   (Books у SQL + ProcessedEvents)
+                                                                              └─ "book.renamed" ─► reviews.catalog-sync ─► reviews-api (bookTitle у MongoDB + processedEvents)
+                                       відхилені/необроблені ─► catalog-events.dlx (direct) ─► <черга>.dlq
+```
+
+## Що де
+| Вимога | Де в коді |
+|---|---|
+| RabbitMQ в AppHost (volume, Management UI) | `Platform.AppHost/AppHost.cs` — `AddRabbitMQ("messaging", password: …).WithDataVolume().WithManagementPlugin(port: 15672)`, `WithReference(rabbit).WaitFor(rabbit)` для catalog/loans/reviews |
+| Aspire.RabbitMQ.Client (7.x), `IConnection`, health check | `Platform.Messaging/MessagingExtensions.cs` — `builder.AddRabbitMQClient("messaging")` (singleton `IConnection`, health check Aspire) + власна перевірка `rabbitmq-connection` (тег `ready`); асинхронний API `IChannel` |
+| Декларативна топологія (topic exchange, черги, bindings, DLX/DLQ) | `Platform.Messaging/Topology/MessagingTopology.cs`; оголошується під час старту (`TopologyInitializer` і `RabbitMqEventConsumer`) |
+| Незмінні integration events (EventId, CorrelationId) | `Platform.Messaging/Events/IntegrationEvent.cs`, `CatalogEvents.cs` — `record` з `init` |
+| `IEventPublisher` + persistent-публікація в JSON | `Platform.Messaging/Publishing/` — `Persistent`, `ContentType`, `MessageId = EventId`, `Type`, `x-correlation-id`, `x-schema-version`; camelCase (`JsonDefaults`) |
+| Публікація лише після збереження змін | `Library.Catalog.Bll/Services/BookService.cs` — `ChangePriceCoreAsync`, `RenameCoreAsync`: `SaveChangesAsync` → `PublishAsync` |
+| Consumer як `BackgroundService`, ручне підтвердження | `Platform.Messaging/Consuming/RabbitMqEventConsumer.cs` — `BasicQos`, `AsyncEventingBasicConsumer`, `autoAck: false`, зупинка через `stoppingToken` |
+| Ack / Nack без requeue | той самий файл: успіх → `BasicAckAsync`; JSON/несумісна версія → `BasicNackAsync(requeue: false)` → DLQ |
+| Ідемпотентні обробники, `ProcessedEvents` | Видачі: `Library.Loans.Bll/Events/*Handler.cs`, `Library.Loans.Dal/Repositories/ProcessedEventRepository.cs`, таблиця в `Platform.AppHost/db/loans-init.sql`; Відгуки: `Library.Reviews.Infrastructure/Messaging/BookRenamedHandler.cs`, колекція `processedEvents` |
+| Репліка даних за політикою Лаб. 01 | Видачі: `BookRepository.UpdatePriceAsync/UpdateTitleAsync`; Відгуки: `UpdateMany` по `bookId`; час останньої застосованої зміни (`PriceChangedAt`, `TitleChangedAt`, `bookTitleSyncedAt`) — захист від out-of-order |
+| Повтори з `x-retry-count`, максимум спроб | `RabbitMqEventConsumer.RetryOrDeadLetterAsync` — повторна публікація зі збільшеним лічильником, оригінал підтверджується; після 3 спроб — DLQ |
+| Передача контексту трасування | `Platform.Messaging/Telemetry/TraceContextPropagation.cs` — W3C `traceparent` (Inject/Extract), Activity `Producer` і `Consumer` з тегами `messaging.*`; `AddSource("Platform.Messaging")` у ServiceDefaults |
+| Структуроване логування збоїв | Serilog `LogContext`: `EventId`, `EventType`, `CorrelationId`, `Queue`; ідентифікатори сутностей — у повідомленнях обробників; метрика `messaging.dlq.depth` (gauge) |
+
+## Запуск
+Як у Lab07, плюс **пароль RabbitMQ** (секрет, у репозиторій не потрапляє):
+```powershell
+cd Platform.AppHost
+dotnet user-secrets set "Parameters:rabbit-password" "<пароль>"
+cd ..
+dotnet run --project Platform.AppHost -p:UseAppHost=false
+```
+У Dashboard має з'явитися ресурс **messaging** (Running). Management UI: **http://localhost:15672**, користувач `guest`, пароль — значення `rabbit-password`. Вкладка *Exchanges*: `catalog-events`, `catalog-events.dlx`; *Queues*: `loans.catalog-sync`, `reviews.catalog-sync` та відповідні `*.dlq`; у *Bindings* exchange `catalog-events` — `book.*` і `book.renamed`.
+
+> Якщо Management UI показує порожній список черг після першого запуску — зачекайте кілька секунд: топологію оголошують сервіси при старті.
+
+## Перевірка (контрольні точки)
+Запити — через Gateway (`http://localhost:5000`); у PowerShell:
+```powershell
+# 1. Зміна ціни: за кілька секунд нова ціна з'являється в Books бази LibraryLoans, ціни в LoanItems не змінюються
+Invoke-RestMethod -Method Put -Uri http://localhost:5000/api/books/1/price -ContentType application/json -Body '{"price":199.99}'
+
+# 2. Перейменування: оновлюється Books.Title у видачах і bookTitle в усіх відгуках про книгу 1
+Invoke-RestMethod -Method Put -Uri http://localhost:5000/api/books/1/title -ContentType application/json -Body '{"title":"Кобзар (нове видання)"}'
+```
+Перевірка даних:
+* Видачі (SQL): `SELECT BookId, Title, Price, PriceChangedAt, TitleChangedAt FROM dbo.Books;` та `SELECT * FROM dbo.ProcessedEvents;`
+* Відгуки (MongoDB, `GET /api/reviews?...` або Dashboard → mongo): `bookTitle` оновлено в усіх документах із `bookId = 1`.
+* Management UI → *Queues*: після публікації повідомлення з'являється й швидко зникає з черг (Ack); `MessageId` = `EventId`, заголовок `x-correlation-id`.
+
+### Сценарії стійкості
+1. **Дублікат події.** Management UI → Exchanges → `catalog-events` → *Publish message*: Routing key `book.renamed`; Properties: `message_id` = `11111111-1111-1111-1111-111111111111`, `type` = `BookRenamedEvent`, `delivery_mode` = `2`; Payload:
+   ```json
+   {"bookId":1,"oldTitle":"A","newTitle":"Дублікат-тест","eventId":"11111111-1111-1111-1111-111111111111","occurredAt":"2026-11-24T12:00:00Z","correlationId":"manual-1","schemaVersion":1}
+   ```
+   Надішліть **двічі**: перша обробка змінює дані, друга — у логах `Duplicate event … skipped`, `ProcessedEvents` містить один запис. Значення `occurredAt` підставте **поточним UTC-часом**: подія зі старішою датою за вже застосовану пропускається як застаріла (`Skipped`), а дата з майбутнього заблокувала б наступні реальні зміни.
+2. **Некоректний JSON → DLQ.** Те саме, але Payload `not a json`, `type` = `BookRenamedEvent`: повідомлення без повторів потрапляє в `loans.catalog-sync.dlq` та `reviews.catalog-sync.dlq` (заголовок `x-death` з причиною `rejected`); у логах `Permanent failure … sending to DLQ`; метрика `messaging.dlq.depth` > 0.
+3. **Обробка після перезапуску `loans-api`.** Зупиніть `loans-api` у Dashboard, змініть кілька цін (запити вище) — повідомлення накопичуються в `loans.catalog-sync` (Management UI → *Ready*). Запустіть `loans-api` — усі події обробляються, лічильник у черзі повертається до 0.
+4. **Тимчасовий збій → повтори.** Зупиніть контейнер `sql`, змініть ціну: у логах `loans-api` — `failed, retry 1/3`, `2/3`, `3/3` (заголовок `x-retry-count`), далі `sending to DLQ`; якщо SQL повернути до вичерпання спроб — подія оброблюється.
+5. **Наскрізний trace.** Dashboard → Traces → запит `PUT /api/books/1/price`: spans `PUT books/{id}/price` → `catalog-events publish` (Producer) → `loans.catalog-sync process` (Consumer) → SQL-команди; у Structured logs фільтр за `CorrelationId`.
+
+## Ключові рішення
+* **Спільна бібліотека `Platform.Messaging`**: події, publisher, consumer, топологія і tracing — в одному місці; сервіси підключають її одним викликом `AddMessaging()` + `AddEventConsumer(queue, …)`.
+* **Вся топологія оголошується кожним учасником** (ідемпотентно). Інакше подія, опублікована до першого запуску споживача, була б втрачена: exchange без bindings відкидає повідомлення.
+* **DLX типу `direct`** з `x-dead-letter-routing-key` = ім'я черги (замість `fanout` із прикладу): кожна DLQ отримує лише повідомлення своєї черги.
+* **Повтор — у ту саму чергу** (default exchange, routing key = ім'я черги), а не в `catalog-events`: інакше копію повтору отримали б усі споживачі.
+* **Тимчасовий vs постійний збій.** Тимчасові (БД недоступна, таймаут) — повтори до 3 разів із паузою 1 с × номер спроби; постійні (`JsonException`, невідома версія схеми, відсутні обов'язкові поля) — одразу в DLQ. Подія, на яку сервіс не підписаний, підтверджується й ігнорується (логується попередження).
+* **Out-of-order.** Кожна зміна копії застосовується лише якщо `OccurredAt` події новіший за останній застосований (окремо для ціни й назви).
+* **Ідемпотентність**: SQL — `EventId` у `ProcessedEvents` (PRIMARY KEY) в одній транзакції зі зміною; MongoDB (автономний сервер без транзакцій) — перевірка `processedEvents` → ідемпотентна зміна → запис `_id = EventId`; збій між кроками дає лише безпечне повторне застосування.
+* **Збій брокера після збереження в БД.** Збережена зміна не скасовується, а втрата події фіксується в логах (`Error … was NOT published`). Повну гарантію доставки дає *Transactional Outbox* (подія записується в таблицю тієї ж БД у тій самій транзакції, окремий фоновий процес публікує її) — не реалізовано (за завданням — за бажанням).
+* **Версіонування схеми**: `schemaVersion` у тілі й заголовку `x-schema-version`; нові поля додаються, наявні не перейменовуються; споживач відхиляє версії новіші за підтримувану.
+* **Обмеження**: події створення/видалення книги не публікуються (не потрібні для сценаріїв завдання; Видачі зберігають історію й `FK` без каскаду).
+
+## Питання до захисту
+* **gRPC чи події?** gRPC — синхронна відповідь потрібна тут і зараз (агрегація). Події — повідомити інших про факт без очікування відповіді, послабити зв'язність, пережити тимчасову недоступність споживача.
+* **Eventual consistency**: копія в іншому сервісі оновлюється не миттєво, а за секунди; джерело істини — Каталог.
+* **Чому події незмінні й самодостатні?** Це факти минулого; споживач не має ходити в Каталог по додаткові дані.
+* **Exchange / queue / binding**: publisher надсилає в exchange з routing key; binding з шаблоном (`*` — одне слово, `#` — будь-яка кількість) спрямовує повідомлення в черги; кожна черга — окремий споживач (fan-out), екземпляри одного сервісу читають одну чергу (competing consumers).
+* **Ідемпотентність** обов'язкова, бо брокер гарантує *at-least-once*: повідомлення може прийти повторно (обрив зʼєднання до Ack).
+* **Чому повтор — це повторна публікація, а не requeue?** Повідомлення, повернене через requeue, приходить без змін — лічильник у заголовку збільшити не можна.
+* **Dead Letter Exchange**: куди RabbitMQ переносить відхилені (Nack requeue:false) повідомлення; зберігає оригінал і заголовок `x-death`; потребує ручного розслідування.
+* **Як працює trace через брокер?** `traceparent` у заголовках повідомлення: publisher — Inject, consumer — Extract і новий Activity `Consumer`, дочірній до span публікації.
+
+---
+
+# Lab07 (попередня робота) — Резильєнтність (Polly), бізнес-метрики та Health Checks
 
 Розширення платформи з Lab06 (Aspire, YARP Gateway, Aggregator на gRPC, Redis-кеш):
 

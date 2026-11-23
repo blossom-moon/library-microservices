@@ -34,6 +34,7 @@ public class CorrelationIdMiddleware(RequestDelegate next, ILogger<CorrelationId
         });
 
         Activity.Current?.SetTag("correlation.id", correlationId);
+        CorrelationContext.Current = correlationId;   // Лаб. 08: подія, опублікована під час запиту, успадкує цей CorrelationId
 
         using (LogContext.PushProperty("CorrelationId", correlationId))
         {

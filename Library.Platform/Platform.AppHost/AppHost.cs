@@ -12,6 +12,13 @@ var sql = builder.AddSqlServer("sql", sqlPassword)
 var loansDb = sql.AddDatabase("LibraryLoans")
     .WithCreationScript(File.ReadAllText(Path.Combine(builder.AppHostDirectory, "db", "loans-init.sql")));
 var catalogDb = sql.AddDatabase("CatalogDb");
+var identityDb = sql.AddDatabase("IdentityDb");   // Лаб. 09: користувачі, ролі та refresh-токени Auth Service
+
+// Лаб. 09: окремий SQL Server для IdentityServer (користувачі + Configuration/Operational store) — ізольований від Auth Service
+var identityServerSql = builder.AddSqlServer("identityserver-sql", sqlPassword)
+    .WithDataVolume("library-identityserver-sql-data")
+    .WithLifetime(ContainerLifetime.Persistent);
+var identityServerDb = identityServerSql.AddDatabase("IdentityServerDb");
 
 var mongo = builder.AddMongoDB("mongo")
     .WithDataVolume("library-mongo-data")
@@ -24,6 +31,37 @@ var redis = builder.AddRedis("redis")
     .WithDataVolume("library-redis-data")
     .WithLifetime(ContainerLifetime.Persistent);
 
+// Лаб. 08: RabbitMQ — брокер повідомлень для подієвої інтеграції сервісів.
+// Пароль — секретний параметр (user-secrets), бо з постійним томом згенерований щоразу новий пароль не збігся б зі збереженим.
+// Management UI — http://localhost:15672 (користувач guest, пароль — значення параметра rabbit-password).
+var rabbitPassword = builder.AddParameter("rabbit-password", secret: true);
+var rabbit = builder.AddRabbitMQ("messaging", password: rabbitPassword)
+    .WithDataVolume("library-rabbitmq-data")      // черги й повідомлення переживають перезапуск
+    .WithManagementPlugin(port: 15672)            // веб-інтерфейс керування
+    .WithLifetime(ContainerLifetime.Persistent);
+
+// Лаб. 09: Keycloak (Authorization Services) — realm LibraryRealm створюється Pulumi-проєктом Pulumi/Library.Keycloak.Pulumi.
+// Адмін-пароль — секретний параметр (user-secrets), бо з постійним томом згенерований пароль не збігся б зі збереженим.
+var keycloakAdminPassword = builder.AddParameter("keycloak-admin-password", secret: true);
+var keycloak = builder.AddKeycloak("keycloak", port: 8080, adminPassword: keycloakAdminPassword)
+    .WithDataVolume("library-keycloak-data")
+    .WithLifetime(ContainerLifetime.Persistent);
+
+// Лаб. 09: параметри безпеки. Секрет підпису локальних JWT (HS256, ≥ 32 символи): dotnet user-secrets set "Parameters:jwt-secret" "<...>"
+var jwtSecret = builder.AddParameter("jwt-secret", secret: true);
+var identityServerClientSecret = builder.AddParameter("aggregator-client-secret", secret: true);
+const string identityServerAuthority = "http://localhost:5400";
+const string keycloakAuthority = "http://localhost:8080/realms/LibraryRealm";
+
+// Спільні налаштування перевірки JWT для всіх ресурсів, що приймають токени (Local / IdentityServer / Keycloak)
+IResourceBuilder<T> WithAuth<T>(IResourceBuilder<T> resource) where T : IResourceWithEnvironment =>
+    resource
+        .WithEnvironment("Jwt__Issuer", "library-auth")
+        .WithEnvironment("Jwt__Audience", "library-api")
+        .WithEnvironment("Jwt__SecretKey", jwtSecret)
+        .WithEnvironment("IdentityServer__Authority", identityServerAuthority)
+        .WithEnvironment("Keycloak__Authority", keycloakAuthority);
+
 // ---------- Сервіси: БД → сервіси → Aggregator → Gateway ----------
 // Лаб. 07: WithHttpHealthCheck("/health/ready") — Aspire опитує readiness-endpoint; статус ресурсу у Dashboard
 // стає Healthy лише після успішних перевірок залежностей, і лише тоді WaitFor пропускає залежні ресурси.
@@ -31,33 +69,56 @@ var redis = builder.AddRedis("redis")
 // сповільнює Reviews → timeout/retry/circuit breaker в Aggregator.
 var chaosDelayMs = Environment.GetEnvironmentVariable("CHAOS_REVIEWS_DELAY_MS") ?? "0";
 
-var loansApi = builder.AddProject<Projects.Library_Loans_Api>("loans-api")
+// Auth Service (Identity + JWT) і IdentityServer (OAuth 2.0 / OIDC) — Лаб. 09
+var authApi = WithAuth(builder.AddProject<Projects.Library_Auth_Api>("auth-api")
+    .WithReference(identityDb).WaitFor(identityDb)
+    .WithHttpHealthCheck("/health/ready"));
+
+builder.AddProject<Projects.Library_IdentityServer>("identityserver")
+    .WithReference(identityServerDb).WaitFor(identityServerDb)
+    .WithEnvironment("Clients__AggregatorSecret", identityServerClientSecret)
+    .WithHttpHealthCheck("/health/ready");
+
+var loansApi = WithAuth(builder.AddProject<Projects.Library_Loans_Api>("loans-api")
     .WithReference(loansDb).WaitFor(loansDb)
-    .WithHttpHealthCheck("/health/ready");
+    .WithReference(rabbit).WaitFor(rabbit)         // споживач подій Каталогу (loans.catalog-sync)
+    .WithHttpHealthCheck("/health/ready"));
 
-var catalogApi = builder.AddProject<Projects.Library_Catalog_Api>("catalog-api")
+var catalogApi = WithAuth(builder.AddProject<Projects.Library_Catalog_Api>("catalog-api")
     .WithReference(catalogDb).WaitFor(catalogDb)
+    .WithReference(rabbit).WaitFor(rabbit)         // публікує події (exchange catalog-events)
     .WithReference(redis).WaitFor(redis)
-    .WithHttpHealthCheck("/health/ready");
+    .WithHttpHealthCheck("/health/ready"));
 
-var reviewsApi = builder.AddProject<Projects.Library_Reviews_WebApi>("reviews-api")
+var reviewsApi = WithAuth(builder.AddProject<Projects.Library_Reviews_WebApi>("reviews-api")
     .WithReference(reviewsDb).WaitFor(reviewsDb)
+    .WithReference(rabbit).WaitFor(rabbit)         // споживач подій Каталогу (reviews.catalog-sync)
     .WithEnvironment("Chaos__DelayMs", chaosDelayMs)
-    .WithHttpHealthCheck("/health/ready");
+    .WithHttpHealthCheck("/health/ready"));
 
-var aggregator = builder.AddProject<Projects.Platform_Aggregator>("aggregator")
+// Лаб. 09: заглушка платіжного сервісу (ресурс payments-api у Keycloak)
+var paymentsApi = WithAuth(builder.AddProject<Projects.Library_Payments_Api>("payments-api")
+    .WithHttpHealthCheck("/health/ready"));
+
+var aggregator = WithAuth(builder.AddProject<Projects.Platform_Aggregator>("aggregator")
     .WithReference(loansApi).WaitFor(loansApi)
     .WithReference(catalogApi).WaitFor(catalogApi)
     .WithReference(reviewsApi).WaitFor(reviewsApi)
     .WithReference(redis).WaitFor(redis)
-    .WithHttpHealthCheck("/health/ready");
+    // Client Credentials: Aggregator отримує токен в IdentityServer (без користувача) для викликів downstream-сервісів
+    .WithEnvironment("ClientCredentials__Authority", identityServerAuthority)
+    .WithEnvironment("ClientCredentials__ClientId", "aggregator_service")
+    .WithEnvironment("ClientCredentials__ClientSecret", identityServerClientSecret)
+    .WithEnvironment("ClientCredentials__Scope", "loans.read catalog.read reviews.read")
+    .WithHttpHealthCheck("/health/ready"));
 
 // Єдина публічна точка входу з фіксованим портом 5000
-builder.AddProject<Projects.Platform_ApiGateway>("gateway")
+WithAuth(builder.AddProject<Projects.Platform_ApiGateway>("gateway")
     .WithReference(aggregator).WaitFor(aggregator)
     .WithReference(loansApi).WithReference(catalogApi).WithReference(reviewsApi)
+    .WithReference(authApi).WithReference(paymentsApi)
     .WithHttpEndpoint(port: 5000, name: "public")
     .WithExternalHttpEndpoints()
-    .WithHttpHealthCheck("/health/ready");
+    .WithHttpHealthCheck("/health/ready"));
 
 builder.Build().Run();

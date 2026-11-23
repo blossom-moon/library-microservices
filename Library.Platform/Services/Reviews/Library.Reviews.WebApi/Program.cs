@@ -1,3 +1,6 @@
+using Platform.Security;
+using Platform.Security.Authentication;
+using Platform.Security.Authorization;
 using Library.Reviews.Application;
 using Library.Reviews.Application.Reviews;
 using Library.Reviews.Infrastructure;
@@ -5,6 +8,10 @@ using Library.Reviews.WebApi.GrpcServices;
 using Library.Reviews.WebApi.Middleware;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using MongoDB.Driver;
+using Library.Reviews.Infrastructure.Messaging;
+using Platform.Messaging;
+using Platform.Messaging.Events;
+using Platform.Messaging.Topology;
 using Platform.ServiceDefaults.Correlation;
 using Platform.ServiceDefaults.GrpcSupport;
 
@@ -33,6 +40,11 @@ builder.Services.AddHealthChecks()
         failureStatus: HealthStatus.Unhealthy, tags: ["database", "mongodb", "ready"], timeout: TimeSpan.FromSeconds(5));
 builder.Services.AddGrpcReadinessHealth();
 
+// Лаб. 08: RabbitMQ (IConnection через Aspire, топологія при старті) і споживач черги reviews.catalog-sync
+builder.AddMessaging();
+builder.Services.AddEventConsumer(MessagingTopology.ReviewsQueue, registry => registry
+    .Handle<BookRenamedEvent, BookRenamedHandler>());
+
 builder.Services.AddAutoMapper(cfg =>
 {
     if (!string.IsNullOrWhiteSpace(licenseKey)) cfg.LicenseKey = licenseKey;
@@ -52,6 +64,10 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
+// Лаб. 09: JWT (Local/IdentityServer/Keycloak) + політики дозволів
+builder.AddLibraryAuthentication(ApiResourceNames.Reviews);
+builder.Services.AddLibraryAuthorization();
+
 var app = builder.Build();
 
 app.UseMiddleware<CorrelationIdMiddleware>();   // наскрізний X-Correlation-Id (ServiceDefaults)
@@ -60,6 +76,8 @@ app.UseExceptionHandler();
 app.UseSwagger();
 app.UseSwaggerUI();
 
+app.UseAuthentication();
+app.UseAuthorization();
 app.MapControllers();
 app.MapGrpcService<ReviewsGrpcService>();   // контракт Protos/reviews.proto
 app.MapGrpcReadinessHealth();               // grpc.health.v1.Health (Лаб. 07)

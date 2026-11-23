@@ -13,6 +13,9 @@ public class MongoDbContext
     public IMongoCollection<Review> Reviews { get; }
     public IMongoCollection<Discussion> Discussions { get; }
 
+    /// <summary>Оброблені події (_id = EventId як рядок): унікальність _id гарантує, що подію застосовано не двічі.</summary>
+    public IMongoCollection<MongoDB.Bson.BsonDocument> ProcessedEvents { get; }
+
     public string ReviewsCollectionName { get; }
 
     public MongoDbContext(IOptions<MongoDbOptions> options)
@@ -29,5 +32,6 @@ public class MongoDbContext
         ReviewsCollectionName = o.ReviewsCollection;
         Reviews = Database.GetCollection<Review>(o.ReviewsCollection);
         Discussions = Database.GetCollection<Discussion>(o.DiscussionsCollection);
+        ProcessedEvents = Database.GetCollection<MongoDB.Bson.BsonDocument>(o.ProcessedEventsCollection);
     }
 }

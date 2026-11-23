@@ -12,6 +12,9 @@
     <PackageReference Include="Aspire.Hosting.SqlServer" Version="13.6.1" />
     <PackageReference Include="Aspire.Hosting.MongoDB" Version="13.6.1" />
     <PackageReference Include="Aspire.Hosting.Redis" Version="13.6.1" />
+    <PackageReference Include="Aspire.Hosting.RabbitMQ" Version="13.6.1" />
+    <!-- Keycloak-інтеграція Aspire поки що має preview-версію -->
+    <PackageReference Include="Aspire.Hosting.Keycloak" Version="13.*-*" />
   </ItemGroup>
 
   <ItemGroup>
@@ -19,6 +22,9 @@
     <ProjectReference Include="..\Services\Loans\Library.Loans.Api\Library.Loans.Api.csproj" />
     <ProjectReference Include="..\Services\Catalog\Library.Catalog.Api\Library.Catalog.Api.csproj" />
     <ProjectReference Include="..\Services\Reviews\Library.Reviews.WebApi\Library.Reviews.WebApi.csproj" />
+    <ProjectReference Include="..\Services\Auth\Library.Auth.Api\Library.Auth.Api.csproj" />
+    <ProjectReference Include="..\Services\IdentityServer\Library.IdentityServer\Library.IdentityServer.csproj" />
+    <ProjectReference Include="..\Services\Payments\Library.Payments.Api\Library.Payments.Api.csproj" />
     <ProjectReference Include="..\Platform.Aggregator\Platform.Aggregator.csproj" />
     <ProjectReference Include="..\Platform.ApiGateway\Platform.ApiGateway.csproj" />
   </ItemGroup>

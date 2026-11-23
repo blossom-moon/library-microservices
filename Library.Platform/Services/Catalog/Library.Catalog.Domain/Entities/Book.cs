@@ -48,6 +48,12 @@ public class Book
         Price = newPrice;
     }
 
+    public void Rename(string newTitle)
+    {
+        if (string.IsNullOrWhiteSpace(newTitle)) throw new DomainException("Title is required.");
+        Title = newTitle.Trim();
+    }
+
     public void RemoveCopies(int quantity)
     {
         if (quantity <= 0) throw new DomainException("Quantity must be positive.");

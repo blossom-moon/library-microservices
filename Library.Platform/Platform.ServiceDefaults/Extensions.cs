@@ -112,6 +112,7 @@ public static class Extensions
                     ? new AlwaysOnSampler()
                     : new ParentBasedSampler(new TraceIdRatioBasedSampler(0.1)))
                 .AddSource(builder.Environment.ApplicationName)
+                .AddSource("Platform.Messaging")                                // Лаб. 08: publish/consume через RabbitMQ
                 .AddSource("Library.*", "Platform.*")                           // власні spans бізнес-операцій
                 .AddSource("MongoDB.Driver.Core.Extensions.DiagnosticSources")  // команди MongoDB
                 .AddAspNetCoreInstrumentation(o => o.Filter = ctx =>

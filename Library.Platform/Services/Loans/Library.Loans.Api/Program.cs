@@ -1,3 +1,6 @@
+using Platform.Security;
+using Platform.Security.Authentication;
+using Platform.Security.Authorization;
 using AutoMapper;
 using Library.Loans.Api.GrpcServices;
 using Library.Loans.Bll;
@@ -8,6 +11,10 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Library.Loans.Dal;
 using Library.Loans.Dal.Interfaces;
 using Library.Loans.Domain;
+using Library.Loans.Bll.Events;
+using Platform.Messaging;
+using Platform.Messaging.Events;
+using Platform.Messaging.Topology;
 using Platform.ServiceDefaults.Correlation;
 using Platform.ServiceDefaults.GrpcSupport;
 
@@ -25,6 +32,12 @@ builder.Services.AddScoped<IUnitOfWork>(_ => new UnitOfWork(connectionString));
 // DI: BLL-сервіси
 builder.Services.AddScoped<IReaderService, ReaderService>();
 builder.Services.AddScoped<ILoanService, LoanService>();
+
+// Лаб. 08: RabbitMQ (IConnection через Aspire, топологія при старті) і споживач черги loans.catalog-sync
+builder.AddMessaging();
+builder.Services.AddEventConsumer(MessagingTopology.LoansQueue, registry => registry
+    .Handle<BookPriceChangedEvent, BookPriceChangedHandler>()
+    .Handle<BookRenamedEvent, BookRenamedHandler>());
 
 // Лаб. 07: бізнес-метрики (Singleton: один екземпляр Meter на весь час роботи сервісу)
 builder.Services.AddSingleton<LoanMetrics>();
@@ -50,6 +63,10 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddExceptionHandler<Library.Loans.Api.Middleware.GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
+// Лаб. 09: JWT (Local/IdentityServer/Keycloak) + політики дозволів
+builder.AddLibraryAuthentication(ApiResourceNames.Loans);
+builder.Services.AddLibraryAuthorization();
+
 var app = builder.Build();
 app.UseMiddleware<CorrelationIdMiddleware>();   // наскрізний X-Correlation-Id (ServiceDefaults)
 
@@ -62,6 +79,7 @@ if (app.Environment.IsDevelopment())
 app.UseExceptionHandler(); // глобальна обробка через ProblemDetails-middleware (Крок 22)
 if (!app.Environment.IsDevelopment())
     app.UseHttpsRedirection();   // у Development TLS не потрібен: сервіс слухає HTTP за Aspire/Gateway
+app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 app.MapGrpcService<LoansGrpcService>();   // контракт Protos/loans.proto

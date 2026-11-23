@@ -10,6 +10,9 @@ public class Review : BaseEntity
 
     public long BookId { get; private set; }
     public string BookTitle { get; private set; } = "";
+
+    /// <summary>Лаб. 08: OccurredAt останньої застосованої BookRenamedEvent (захист від out-of-order доставки).</summary>
+    public DateTime? BookTitleSyncedAt { get; private set; }
     public Author Author { get; private set; } = null!;
     public int Rating { get; private set; }
     public string Text { get; private set; } = "";

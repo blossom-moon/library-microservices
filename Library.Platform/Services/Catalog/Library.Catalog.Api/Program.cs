@@ -1,3 +1,6 @@
+using Platform.Security;
+using Platform.Security.Authentication;
+using Platform.Security.Authorization;
 using FluentValidation;
 using Library.Catalog.Api.GrpcServices;
 using Library.Catalog.Api.HealthChecks;
@@ -14,6 +17,7 @@ using Library.Catalog.Dal.Repositories;
 using Library.Catalog.Dal.Seed;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Platform.Messaging;
 using Platform.ServiceDefaults.Correlation;
 using Platform.ServiceDefaults.GrpcSupport;
 
@@ -55,6 +59,9 @@ builder.Services.AddHealthChecks()
         failureStatus: HealthStatus.Degraded, tags: ["cache", "redis", "ready"], timeout: TimeSpan.FromSeconds(3));
 builder.Services.AddGrpcReadinessHealth();
 
+// ---- Лаб. 08: RabbitMQ — IConnection (Aspire), publisher, оголошення топології при старті ----
+builder.AddMessaging();
+
 // ---- Лаб. 06: gRPC (серверний interceptor логує метод, peer, статус і тривалість) ----
 builder.Services.AddGrpc(o => o.Interceptors.Add<GrpcLoggingInterceptor>());
 
@@ -81,6 +88,10 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
+// Лаб. 09: JWT (Local/IdentityServer/Keycloak) + політики дозволів
+builder.AddLibraryAuthentication(ApiResourceNames.Catalog);
+builder.Services.AddLibraryAuthorization();
+
 var app = builder.Build();
 
 // ---- Міграції та ідемпотентний сідінг (вимикається в Production або Seeding:Enabled=false) ----
@@ -102,6 +113,8 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
+app.UseAuthentication();
+app.UseAuthorization();
 app.MapControllers();
 app.MapGrpcService<CatalogGrpcService>();       // gRPC-контракт Protos/catalog.proto
 app.MapGrpcReadinessHealth();                   // grpc.health.v1.Health (Лаб. 07)

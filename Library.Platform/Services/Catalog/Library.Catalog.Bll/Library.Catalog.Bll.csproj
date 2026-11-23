@@ -3,6 +3,8 @@
   <ItemGroup>
     <ProjectReference Include="..\Library.Catalog.Dal\Library.Catalog.Dal.csproj" />
     <ProjectReference Include="..\Library.Catalog.Domain\Library.Catalog.Domain.csproj" />
+    <!-- Лаб. 08: IEventPublisher і події -->
+    <ProjectReference Include="..\..\..\Platform.Messaging\Platform.Messaging.csproj" />
   </ItemGroup>
 
   <ItemGroup>

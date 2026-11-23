@@ -1,3 +1,5 @@
+using Platform.Security;
+using Platform.Security.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Library.Loans.Bll.Dto;
 using Library.Loans.Bll.Interfaces;
@@ -15,6 +17,8 @@ public class LoansController : ControllerBase
         _loanService = loanService;
     }
 
+    [RequirePermission(Permissions.Loans.Read)]
+
     [HttpGet("{id:long}")]
     [ProducesResponseType(typeof(LoanDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -24,6 +28,8 @@ public class LoansController : ControllerBase
         return Ok(loan);
     }
 
+    [RequirePermission(Permissions.Loans.Read)]
+
     [HttpGet("by-reader/{readerId:long}")]
     [ProducesResponseType(typeof(IEnumerable<LoanDto>), StatusCodes.Status200OK)]
     public async Task<ActionResult<IEnumerable<LoanDto>>> GetActiveByReader(long readerId, CancellationToken ct)
@@ -31,6 +37,8 @@ public class LoansController : ControllerBase
         var loans = await _loanService.GetActiveLoansByReaderAsync(readerId, ct);
         return Ok(loans);
     }
+
+    [RequirePermission(Permissions.Loans.Create)]
 
     [HttpPost]
     [ProducesResponseType(typeof(LoanDto), StatusCodes.Status201Created)]
@@ -43,6 +51,8 @@ public class LoansController : ControllerBase
         return CreatedAtAction(nameof(GetById), new { id = created.LoanId }, created);
     }
 
+    [RequirePermission(Permissions.Loans.Update)]
+
     [HttpPost("{id:long}/return/{bookId:long}")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -52,6 +62,8 @@ public class LoansController : ControllerBase
         await _loanService.ReturnBookAsync(id, bookId, ct);
         return NoContent();
     }
+
+    [RequirePermission(Permissions.Loans.Delete)]
 
     [HttpPost("{id:long}/cancel")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]

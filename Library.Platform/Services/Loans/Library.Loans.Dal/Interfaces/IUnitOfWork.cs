@@ -7,6 +7,7 @@ public interface IUnitOfWork : IAsyncDisposable
     IReaderRepository Readers { get; }
     IBookRepository Books { get; }
     ILoanRepository Loans { get; }
+    IProcessedEventRepository ProcessedEvents { get; }
 
     Task BeginTransactionAsync(IsolationLevel isolationLevel, CancellationToken ct);
     Task CommitAsync(CancellationToken ct);

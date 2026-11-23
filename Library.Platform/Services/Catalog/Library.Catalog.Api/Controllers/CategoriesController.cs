@@ -1,3 +1,5 @@
+using Platform.Security;
+using Platform.Security.Authorization;
 using Library.Catalog.Bll.Dto;
 using Library.Catalog.Bll.Interfaces;
 using Microsoft.AspNetCore.Mvc;
@@ -13,6 +15,7 @@ public class CategoriesController : ApiControllerBase
     public CategoriesController(IBookService service) => _service = service;
 
     /// <summary>Книги категорії (друга специфікація — BooksByCategorySpec).</summary>
+    [RequirePermission(Permissions.Catalog.Read)]
     [HttpGet("{id:long}/books")]
     [ProducesResponseType(typeof(IReadOnlyList<BookDto>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
